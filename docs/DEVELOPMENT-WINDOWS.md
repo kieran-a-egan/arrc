@@ -1,6 +1,6 @@
 # ARRC development on Windows (native)
 
-The primary host is native Windows PowerShell, without mandatory WSL or Docker. The toolchain is pinned (see below). M0-02 will provide the read-only doctor command.
+The primary host is native Windows PowerShell, without mandatory WSL or Docker. The toolchain is pinned (see below). `npm run doctor` is the read-only environment doctor. For machine-readable output use `npm run doctor --silent -- --json` (`--silent` keeps npm notices out of stdout). The doctor always exits 0; read the statuses.
 
 ## Pinned toolchain and commands
 
