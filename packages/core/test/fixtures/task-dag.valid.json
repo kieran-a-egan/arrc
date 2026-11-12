@@ -1,0 +1,1 @@
+{"schemaVersion":1,"dagId":"d1","tasks":[{"taskId":"a","title":"A","dependsOn":[],"requiredCapabilities":["fs"],"command":{"executable":"git","args":["status"]}},{"taskId":"b","title":"B","dependsOn":["a"],"requiredCapabilities":[]}]}

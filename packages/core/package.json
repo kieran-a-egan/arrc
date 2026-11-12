@@ -12,5 +12,8 @@
     "build": "tsc -p .",
     "typecheck": "tsc -p . --noEmit",
     "test": "tsc -p . && node --test \"src/**/*.test.ts\" \"test/*.test.js\""
+  },
+  "dependencies": {
+    "zod": "4.6.7"
   }
 }

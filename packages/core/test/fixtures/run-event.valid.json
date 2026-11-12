@@ -1,0 +1,1 @@
+{"schemaVersion":1,"eventId":"ev1","runId":"r1","seq":0,"at":"2026-01-01T00:00:00Z","type":"task.failed","taskId":"a","reason":"boom"}
