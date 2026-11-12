@@ -1,0 +1,27 @@
+name: Epic
+description: Outcome-level capability requiring later decomposition
+title: "[M?-??] "
+body:
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Outcome and milestone
+      description: Measurable capability and product impact
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Contracts, prerequisites and capability gates
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Epic acceptance criteria
+      description: Include Windows and failure-mode verification requirements
+    validations:
+      required: true
+  - type: markdown
+    attributes:
+      value: "This epic is not Ready to implement. Split into independently verifiable sub-issues after earlier contracts are proven."
