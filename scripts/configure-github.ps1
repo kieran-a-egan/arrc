@@ -106,9 +106,10 @@ if ($Project) {
   if (-not $Apply) {
     Write-Host "[dry-run] Ensure GitHub Project 'ARRC Roadmap' exists for $owner."
   } else {
-    $projectResult = & gh project list --owner $owner --format json 2>$null
+    # Keep GitHub CLI stderr visible so missing OAuth scope and API errors are actionable.
+    $projectResult = & gh project list --owner $owner --format json
     if ($LASTEXITCODE -ne 0) {
-      Write-Warning "GitHub Projects unavailable. Run gh auth refresh -s project if necessary."
+      Write-Warning "GitHub Projects unavailable. Review the gh project list error above; verify gh auth status, then run gh auth refresh -s project if the token lacks scope. If GH_TOKEN or GITHUB_TOKEN is set, that environment token may take precedence."
     } else {
       $projects = $projectResult | ConvertFrom-Json
       $existingProject = @($projects.projects | Where-Object { $_.title -eq "ARRC Roadmap" })
@@ -123,7 +124,7 @@ if ($Project) {
 }
 if ($Apply -and $Project) {
   $owner = ($Repository -split "/")[0]
-  $updatedList = & gh project list --owner $owner --format json 2>$null
+  $updatedList = & gh project list --owner $owner --format json
   if ($LASTEXITCODE -eq 0) {
     $projectsNow = $updatedList | ConvertFrom-Json
     $selectedProject = $projectsNow.projects | Where-Object { $_.title -eq "ARRC Roadmap" } | Select-Object -First 1
