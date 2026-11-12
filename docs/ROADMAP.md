@@ -50,4 +50,4 @@ A Ready issue has explicit versioned dependencies, target environment, verifiabl
 
 ## Native GitHub Milestones/Project
 
-The connected GitHub integration creates issues/files but does not expose native Milestone/Project creation. The five stage trackers are therefore issues, not true GitHub Milestones. Use the [Windows GitHub configuration script](../scripts/configure-github.ps1) after authenticating gh to create milestones, apply them to the already-created issues and optionally organise a Project.
+The connected GitHub integration creates issues/files but does not expose native Milestone/Project creation. The five stage trackers are therefore issues, not true GitHub Milestones. The native M0–M4 milestones have already been created by the repository owner. The [Windows GitHub configuration script](../scripts/configure-github.ps1) now **reuses** existing milestones (matching their stage prefixes), assigns them to the existing issues, and can create/populate an ARRC Roadmap Project. It never attempts milestone creation.
