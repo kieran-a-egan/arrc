@@ -1,0 +1,1 @@
+{"schemaVersion":1,"grantId":"g1","operation":{"executable":"git","args":["status"]},"operationDigest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","requestedBy":{"kind":"model","id":"m1"},"approvedBy":{"kind":"user","id":"u1"},"target":"repo","policyId":"p1","issuedAt":"2026-01-01T00:00:00Z","expiresAt":"2026-01-02T00:00:00Z","revoked":false}
