@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 export type Status = "ok" | "missing" | "mismatch" | "unverified" | "blocked" | "unsupported";
 export interface Capability {
@@ -360,7 +361,17 @@ export function formatReport(report: DoctorReport): string {
   return lines.join("\n");
 }
 
-if (import.meta.main) {
+// import.meta.main is missing on older Node releases; fall back to comparing realpaths (junction/symlink safe).
+const isMain =
+  (import.meta as { main?: boolean }).main ??
+  (() => {
+    try {
+      return fs.realpathSync(fileURLToPath(import.meta.url)) === fs.realpathSync(path.resolve(process.argv[1] ?? ""));
+    } catch {
+      return false;
+    }
+  })();
+if (isMain) {
   const args = process.argv.slice(2);
   if (args.some((a) => a !== "--json")) {
     process.stderr.write("Usage: doctor [--json]\n");

@@ -28,6 +28,19 @@ test("resolveCommand finds commands in a directory with spaces", (t) => {
   assert.ok(found?.startsWith(dir));
 });
 
+test("npm older than devEngines yields npm.cli mismatch (shim layout, no execution)", async (t) => {
+  const shim = spacedDir(t);
+  const empty = path.dirname(shim);
+  fs.writeFileSync(path.join(shim, win ? "npm.cmd" : "npm"), "");
+  fs.mkdirSync(path.join(shim, "node_modules", "npm"), { recursive: true });
+  fs.writeFileSync(path.join(shim, "node_modules", "npm", "package.json"), JSON.stringify({ name: "npm", version: "11.0.0" }));
+  const env: Record<string, string> = { PATH: shim, PATHEXT: ".CMD", HOME: empty, USERPROFILE: empty, SystemRoot: empty, ProgramFiles: empty };
+  const c = (await runDoctor({ platform: process.platform, env })).capabilities.find((x) => x.id === "npm.cli");
+  assert.equal(c?.status, "mismatch");
+  assert.equal(c.version, "11.0.0");
+  assert.match(c.remedy ?? "", /12\.0\.2/);
+});
+
 test("missing commands yield actionable diagnostics without throwing", async (t) => {
   const empty = spacedDir(t);
   const ctx: Ctx = { platform: process.platform, env: { PATH: empty, HOME: empty, USERPROFILE: empty, SystemRoot: empty } };

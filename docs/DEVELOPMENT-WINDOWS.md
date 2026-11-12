@@ -1,6 +1,11 @@
 # ARRC development on Windows (native)
 
-The primary host is native Windows PowerShell, without mandatory WSL or Docker. The toolchain is pinned (see below). `npm run doctor` is the read-only environment doctor. For machine-readable output use `npm run doctor --silent -- --json` (`--silent` keeps npm notices out of stdout). The doctor always exits 0; read the statuses.
+The primary host is native Windows PowerShell, without mandatory WSL or Docker. The toolchain is pinned (see below). The environment doctor always exits 0; read the statuses.
+
+- Bootstrap-safe: `node packages/core/src/doctor.ts` (or `node packages/core/src/doctor.ts --json`). It runs without npm, so it works even when your npm fails `devEngines` (`EBADDEVENGINES`) and then reports the npm mismatch. No `npm ci` or build needed.
+- Already-compliant environments: `npm run doctor`, or `npm run doctor --silent -- --json` (`--silent` keeps npm notices out of stdout).
+- Node 24 (`.nvmrc`) is the supported version. Node 22.18+/23.6+ can still run the doctor (type stripping is on by default) and it will report `node.runtime: mismatch`. Older Node fails with `ERR_UNKNOWN_FILE_EXTENSION`: install the `.nvmrc` version from https://nodejs.org (or your version manager) and re-run.
+- Side effects: the doctor never installs, writes files or uses the network itself. It runs bounded version queries (`git --version`, `docker --version`, `claude --version`, a PowerShell `$PSVersionTable` query with `-NoProfile -NonInteractive`) and, on Windows, npm's `npm-prefix.js` under node; no shell, 5 s timeout (direct child only), update/telemetry opt-out env vars where supported (Claude Code, PowerShell). Third-party executables' internal behaviour can't be guaranteed.
 
 ## Pinned toolchain and commands
 
