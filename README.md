@@ -41,7 +41,7 @@ arrc resume
 
 ## Development environment
 
-Primary development and acceptance platform: **Windows, native PowerShell**. Use the package scripts when M0-01 implements them. The supported Node.js version and toolchain must be selected and validated by the M0 environment doctor rather than inferred from the host.
+Primary development and acceptance platform: **Windows, native PowerShell**. Use the root npm scripts (`npm ci`, `npm run build`, `npm run typecheck`, `npm test`); the pinned toolchain is described in [docs/DEVELOPMENT-WINDOWS.md](docs/DEVELOPMENT-WINDOWS.md). The M0 environment doctor will validate the toolchain rather than inferring it from the host.
 
 ## Name
 

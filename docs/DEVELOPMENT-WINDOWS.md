@@ -1,6 +1,21 @@
 # ARRC development on Windows (native)
 
-The primary host is native Windows PowerShell, without mandatory WSL or Docker. M0-01 will define and pin the supported Node.js/npm toolchain and scripts. M0-02 will provide the read-only doctor command.
+The primary host is native Windows PowerShell, without mandatory WSL or Docker. The toolchain is pinned (see below). M0-02 will provide the read-only doctor command.
+
+## Pinned toolchain and commands
+
+- Node.js `^24.15.0` (`.nvmrc`: 24.19.0) and npm `12.0.2`, enforced by `devEngines` in `package.json` (`onFail: error`).
+- TypeScript 6.0.3; dependencies are locked by `package-lock.json`.
+
+Node 24.19.0 bundles npm 11.17.0, but the repo's `devEngines` requires exactly npm 12.0.2; any other npm version fails every npm command in the repo with `EBADDEVENGINES`. Bump `devEngines`, CI and these docs together when upgrading.
+
+One-time setup (global installs skip the devEngines check), then from the repository root in PowerShell:
+
+    npm install -g npm@12.0.2
+    npm ci
+    npm run build
+    npm run typecheck
+    npm test
 
 ## Read-only prerequisite inspection
 
