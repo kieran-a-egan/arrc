@@ -121,4 +121,22 @@ if ($Project) {
     }
   }
 }
+if ($Apply -and $Project) {
+  $owner = ($Repository -split "/")[0]
+  $updatedList = & gh project list --owner $owner --format json 2>$null
+  if ($LASTEXITCODE -eq 0) {
+    $projectsNow = $updatedList | ConvertFrom-Json
+    $selectedProject = $projectsNow.projects | Where-Object { $_.title -eq "ARRC Roadmap" } | Select-Object -First 1
+    if ($selectedProject) {
+      foreach ($issue in $issues) {
+        if ($issue.pull_request) { continue }
+        & gh project item-add $selectedProject.number --owner $owner --url $issue.html_url 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+          Write-Host "Skipped project item #$($issue.number) (may already be present)."
+        }
+      }
+      Write-Host "Attempted to populate ARRC Roadmap with all existing issues."
+    }
+  }
+}
 Write-Host "Complete. Review https://github.com/$Repository"
