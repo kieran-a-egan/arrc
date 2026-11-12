@@ -2,9 +2,15 @@
   "name": "@arrc/core",
   "private": true,
   "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
   "scripts": {
     "build": "tsc -p .",
     "typecheck": "tsc -p . --noEmit",
-    "test": "node --test \"src/**/*.test.ts\""
+    "test": "tsc -p . && node --test \"src/**/*.test.ts\" \"test/*.test.js\""
   }
 }
