@@ -14,7 +14,8 @@ hooks:
           args:
             - -NoProfile
             - -File
-            - .claude/hooks/arrc-main-guard.ps1
+            - "${CLAUDE_PROJECT_DIR}/.claude/hooks/arrc-main-guard.ps1"
+          onFailure: block
 ---
 
 # ARRC issue workflow
