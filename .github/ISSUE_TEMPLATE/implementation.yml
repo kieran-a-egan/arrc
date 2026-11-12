@@ -1,0 +1,39 @@
+name: Implementation task
+description: Independently reviewable and testable ARRC implementation work
+title: "[M?-??] "
+body:
+  - type: textarea
+    id: objective
+    attributes:
+      label: Objective
+      description: What measurable capability will exist?
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and interfaces
+      description: Packages, contracts and explicit non-goals
+    validations:
+      required: true
+  - type: textarea
+    id: deps
+    attributes:
+      label: Dependencies and environment
+      description: Issue links, OS and required executable/isolation capabilities
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance tests and verification
+      description: Reproducible Windows-native commands and failure scenarios
+    validations:
+      required: true
+  - type: textarea
+    id: policy
+    attributes:
+      label: Security, side effects and approval boundaries
+      description: Credentials, network actions, external effects and policy gates
+    validations:
+      required: true
