@@ -34,7 +34,8 @@ function Invoke-GhJson {
   }
   $json = ([string[]]$output) -join [Environment]::NewLine
   if ([string]::IsNullOrWhiteSpace($json)) { return $null }
-  return ConvertFrom-Json -InputObject $json -Depth 40
+  $data = ConvertFrom-Json -InputObject $json -Depth 40
+  return $data
 }
 
 $owner = ($Repository -split "/")[0]
@@ -109,8 +110,11 @@ foreach ($stage in @("M0", "M1", "M2", "M3", "M4")) {
 $assigned = 0
 $missing = 0
 foreach ($issue in $issues) {
-  if ($issue.title -notmatch '^\[(M[0-4])(?:-\d{2})?\]') { continue }
-  $stage = $Matches[1]
+  if ($issue.title -match '^\[(M[0-4])(?:-\d{2})?\]') {
+    $stage = $Matches[1]
+  } else {
+    continue
+  }
   if (-not $milestoneByStage.ContainsKey($stage)) {
     $missing++
     continue
