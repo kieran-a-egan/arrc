@@ -30,6 +30,14 @@ ARRC (**Agent Runtime & Reasoning Coordinator**) is a local-first, Windows-nativ
 
 Primary M0/M1 environment is native PowerShell on Windows with Node.js/npm, Git for Windows and locally installed coding agents. No mandatory WSL/Docker. Shell-neutral structured process invocation uses explicit executables and arguments, with separate .exe/.cmd/.ps1 handling; test Unicode paths, path escaping, case-insensitive collisions, file locks and descendants on cancellation. A worktree alone cannot satisfy a security sandbox requirement. Optional OS/container isolation tiers are capability-probed and enforced. Local user data should default beneath %LOCALAPPDATA%/ARRC.
 
+## Local storage
+
+- Default location: `%LOCALAPPDATA%\ARRC` (fallback `%USERPROFILE%\AppData\Local\ARRC`). Layout: `arrc.db` (+ `-wal`/`-shm` while open) and `artefacts\<sha256>`.
+- The data directory must be on a local drive: SQLite WAL does not work on network shares. This is a requirement on the user; network shares are not detected. `openStore` fails if WAL cannot be enabled.
+- No hosted telemetry. Events, checkpoints and artefacts never leave the machine.
+- Uses built-in `node:sqlite`, which is Release Candidate (stability 1.2) on Node 24. Re-check its API and stability when bumping `.nvmrc`.
+- Crash-recovery contract: the events table is append-only (enforced by DB triggers) and seq is strictly contiguous per run; a checkpoint's `lastEventSeq` must equal the log head, so it never points past the log; artefacts are published file-first (temp, fsync, rename) then row, so a row never points at a missing file; `recover()` runs on open, deleting stale temp files (older than 60 s), adopting valid orphan files, deleting corrupt ones and reporting rows whose file is missing. Lock contention surfaces as a SQLITE_BUSY error after the busy timeout (default 5 s). Recovery is best-effort per file: vanished files (ENOENT) are skipped silently, locked or otherwise unremovable files are skipped and reported in `skipped`, and neither blocks opening. `putArtefact` repairs a corrupt existing file by re-publishing it; that repair fails loudly (EPERM after retries) if another process holds the file open. Corrupt files that have rows are detected on read (`readArtefact` re-hash), not by the sweep. A duplicate `eventId` returns `duplicate_event`.
+
 ## Scope control
 
 The initial technical delivery is a complete vertical slice: request → evidence/Jev → task plan → native or Claude execution → permission enforcement → independent verification → resumable state → inspected diff. Concurrent agent teams, advanced quota coordination, daemon, TUI, full security tiers and remote workers are later milestones.
