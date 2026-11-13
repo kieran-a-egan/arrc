@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { DENIED_EXECUTABLES, SUPPORTED_ENFORCEMENT, checkPath, decide, loadPolicy, operationDigest, verifyApprovalBinding } from "./index.ts";
+import { DENIED_EXECUTABLES, RISK_RANK, SUPPORTED_ENFORCEMENT, checkPath, decide, loadPolicy, operationDigest, verifyApprovalBinding } from "./index.ts";
 import type { CommandSpec, PolicyConfig, Principal } from "./index.ts";
 
 const NOW = new Date("2026-06-01T12:00:00Z");
@@ -8,6 +8,7 @@ const model = { kind: "model", id: "m1" } as const;
 const other = { kind: "model", id: "m2" } as const;
 const orch = { kind: "orchestrator", id: "o1" } as const;
 const user = { kind: "user", id: "u1" } as const;
+const PROV = { provider: "p", model: "m", modelVersion: "1", requestDigest: `sha256:${"0".repeat(64)}`, evidence: ["operation"] };
 const GIT: CommandSpec = { executable: "C:\\tools\\git.exe", args: ["status"], cwd: "C:\\repo" };
 
 const rule = (ruleId: string, effect: "allow" | "deny", operation: string, target: unknown, principals: unknown[] = [model]) => ({
@@ -117,7 +118,7 @@ test("privilege escalation", () => {
   assert.equal(reason(bare, { operation: "fs.write", target: { path: "C:\\srv\\repo.git\\hooks\\pre-receive" } }), "ceiling_violation");
   assert.ok(rejected(cfg([rule("bw", "allow", "fs.write", { root: "C:\\srv\\repo.git" })])).issues.some((i) => i.code === "ceiling_violation"));
   // advice cannot lower risk below high
-  const low = { schemaVersion: 1, decisionId: "d", taskId: "t", recommendation: "ok", confidence: 1, calibrated: true, risk: "low" };
+  const low = { schemaVersion: 1, decisionId: "d", taskId: "t", category: "c", recommendation: "ok", confidence: 1, calibrated: true, risk: "low", provenance: PROV };
   assert.equal(reason(base, spawn(GIT, { advice: low })), "approval_required");
   // advice can raise fs risk to high, which then fails closed
   assert.equal(reason(base, read("C:\\repo\\a", { advice: { ...low, risk: "high" } })), "approval_required");
@@ -178,6 +179,9 @@ test("verifyApprovalBinding (binding only, not wired into decide)", () => {
 test("ceiling and policy are immutable", () => {
   assert.throws(() => (DENIED_EXECUTABLES as string[]).push("x"));
   assert.throws(() => (SUPPORTED_ENFORCEMENT as string[]).push("isolation.sandbox"));
+  assert.ok(Object.isFrozen(RISK_RANK));
+  assert.throws(() => { (RISK_RANK as Record<string, number>).high = -1; });
+  assert.equal(RISK_RANK.high, 2);
   assert.throws(() => { (base as { policyId: string }).policyId = "evil"; });
   assert.throws(() => { (base.rules[0] as { effect: string }).effect = "deny"; });
   assert.throws(() => (base.rules as unknown[]).push({}));
@@ -272,7 +276,7 @@ test("worktree is not a sandbox", () => {
 });
 
 test("fails closed", () => {
-  const adv = { schemaVersion: 1, decisionId: "d", taskId: "t", recommendation: "ok", confidence: 0.4, calibrated: false, risk: "high" };
+  const adv = { schemaVersion: 1, decisionId: "d", taskId: "t", category: "c", recommendation: "ok", confidence: 0.4, calibrated: false, risk: "high", provenance: PROV };
   assert.equal(reason(base, read("C:\\repo\\a", { advice: adv })), "uncalibrated_high_risk_advice");
   const garbage = [null, undefined, 1, "x", [], {}, { ...read("C:\\repo\\a"), extra: 1 }, { ...read("C:\\repo\\a"), principal: { kind: "root", id: "x" } },
     read("C:\\repo\\a", { requires: "x" }), read("C:\\repo\\a", { advice: { risk: "low" } })];

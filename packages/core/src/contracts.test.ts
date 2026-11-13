@@ -8,6 +8,7 @@ import {
   RunEvent,
   RunState,
   SystemOneDecision,
+  SystemOneRequest,
   TaskDag,
   TaskResult,
   parseContract,
@@ -23,6 +24,7 @@ const code = (s: z.ZodType, input: unknown) => {
 const table: [string, z.ZodType, string][] = [
   ["TaskDag", TaskDag, "task-dag"],
   ["SystemOneDecision", SystemOneDecision, "system-one-decision"],
+  ["SystemOneRequest", SystemOneRequest, "system-one-request"],
   ["ExecutorCapability", ExecutorCapability, "executor-capability"],
   ["OperationApproval", OperationApproval, "operation-approval"],
   ["RunEvent", RunEvent, "run-event"],
@@ -101,6 +103,13 @@ test("label strings reject NUL and blank", () => {
 
 test("SystemOneDecision cannot carry approval", () => {
   assert.equal(code(SystemOneDecision, { ...load("system-one-decision"), approved: true }), "invalid_schema");
+});
+
+test("SystemOneRequest rejects source/content smuggling", () => {
+  const r = load("system-one-request");
+  assert.equal(code(SystemOneRequest, { ...r, source: "x" }), "invalid_schema");
+  assert.equal(code(SystemOneRequest, { ...r, metadata: { ...r.metadata, content: "x" } }), "invalid_schema");
+  assert.equal(code(SystemOneRequest, { ...r, metadata: { ...r.metadata, extensions: ["src/a.ts"] } }), "invalid_schema");
 });
 
 test("TaskDag structural rules", () => {
