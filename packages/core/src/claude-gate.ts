@@ -72,7 +72,18 @@ if (isMain) {
   try {
     const p = loadPolicy(JSON.parse(fs.readFileSync(process.argv[2] ?? "", "utf8")));
     if (!p.ok) throw new Error("invalid policy");
-    process.stdout.write(JSON.stringify(gateToolUse(p.value, JSON.parse(fs.readFileSync(0, "utf8")))) + "\n");
+    const input = JSON.parse(fs.readFileSync(0, "utf8"));
+    const o = gateToolUse(p.value, input);
+    // Optional evidence that the hook ran: one line per decision, never tool_input.
+    if (process.env.ARRC_GATE_AUDIT) {
+      try {
+        const { permissionDecision: decision, permissionDecisionReason: reason } = o.hookSpecificOutput;
+        fs.appendFileSync(process.env.ARRC_GATE_AUDIT, JSON.stringify({ tool_name: str(input?.tool_name) ?? "", decision, reason }) + "\n");
+      } catch {
+        // audit is best-effort; never changes the decision
+      }
+    }
+    process.stdout.write(JSON.stringify(o) + "\n");
   } catch (e) {
     process.stderr.write(`claude-gate: ${(e as Error).message}\n`);
     process.exit(2);

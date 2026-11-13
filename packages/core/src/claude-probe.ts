@@ -3,28 +3,36 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { CLOUD_ENV, scanHookTrust } from "./claude-trust.ts";
 import { locateClaudeExe, runVersion, type Ctx, type Status } from "./doctor.ts";
 
 // Never let the probe self-update or phone home.
 const NO_UPDATE = { DISABLE_AUTOUPDATER: "1", DISABLE_UPDATES: "1", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1" };
 // Presence only, never values: these change which identity/billing the CLI uses.
-const ENV_FLAGS = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CODE_GIT_BASH_PATH"];
+const ENV_FLAGS = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", ...CLOUD_ENV, "CLAUDE_CODE_GIT_BASH_PATH"];
 // Args ARRC must never pass: they bypass or disable the permission hooks that provide enforcement.
-const FORBIDDEN_FLAGS = ["--dangerously-skip-permissions", "--allow-dangerously-skip-permissions", "--bare", "--safe-mode", "--managed-settings"];
-const GATE_DENIED_TOOLS = ["Bash", "PowerShell", "WebFetch", "WebSearch", "Task", "Agent", "mcp__*", "ListMcpResourcesTool", "ReadMcpResourceTool"];
+const FORBIDDEN_FLAGS = ["--dangerously-skip-permissions", "--allow-dangerously-skip-permissions", "--bare", "--safe-mode", "--managed-settings", "--project-config-root"]; // the last relocates where project settings are read, defeating the trust scan
+const GATE_DENIED_TOOLS = ["Bash", "PowerShell", "Monitor", "WebFetch", "WebSearch", "Task", "Agent", "mcp__*", "ListMcpResourcesTool", "ReadMcpResourceTool"];
+// Allowlist (--tools): exactly the gate-mapped tools that are built-in tool names in CLI 2.1.325 (MultiEdit is gate-mapped but not a 2.1.325 tool).
+const GATE_TOOLS = ["Read", "Glob", "Grep", "Write", "Edit", "NotebookEdit"];
+// Also denied (belt and braces) when hook registration cannot be verified. NotebookRead/LS/MultiEdit exist in CLI 2.1.325 strings.
+const FILE_TOOLS = ["Read", "Glob", "Grep", "Write", "Edit", "MultiEdit", "NotebookEdit", "NotebookRead", "LS"];
 
-/** True if extra args (never the prompt; prefixArgs are internal and unchecked) would bypass/disable enforcement or replace the gate settings. */
+/** True if args (never the prompt; runClaude checks prefixArgs and extraArgs together) would bypass/disable enforcement or replace the gate settings. */
 function forbiddenExtraArgs(a: string[]): boolean {
   const eq = (t: string, f: string) => t === f || t.startsWith(f + "=");
   if (a.some((t) => FORBIDDEN_FLAGS.some((f) => eq(t, f)) || eq(t, "--setting-sources"))) return true;
-  if (a.filter((t) => eq(t, "--settings")).length > 1) return true;
-  return a.some((t, i) => (t === "--permission-mode" && a[i + 1] === "bypassPermissions") || t === "--permission-mode=bypassPermissions");
+  if (["--settings", "--tools", "--disallowedTools", "--mcp-config"].some((f) => a.filter((t) => eq(t, f)).length > 1)) return true;
+  const widen = ["bypassPermissions", "acceptEdits", "auto"];
+  return a.some((t, i) => (t === "--permission-mode" && widen.includes(a[i + 1] ?? "")) || widen.some((m) => t === `--permission-mode=${m}`));
 }
 
 // Env names are case-insensitive only on Windows.
 const norm = (k: string) => (process.platform === "win32" ? k.toLowerCase() : k);
 // The CLI disables hooks when these are truthy (--bare / --safe-mode set them), so they must never reach the child.
 const HOOK_OFF_ENV = ["CLAUDE_CODE_SIMPLE", "CLAUDE_CODE_SAFE_MODE"].map(norm);
+// Parent Claude Code session identity must not leak into a gated child (names found by string search of CLI 2.1.325).
+const PARENT_SESSION_ENV = ["CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_PID"].map(norm);
 const envPresence = (env: NodeJS.ProcessEnv) => {
   const seen = Object.fromEntries(Object.entries(env).map(([k, val]) => [norm(k), val]));
   return Object.fromEntries(ENV_FLAGS.map((k) => [k, !!seen[norm(k)]])) as Record<string, boolean>;
@@ -52,7 +60,7 @@ export function classifyAuth(env: NodeJS.ProcessEnv, init?: { apiKeySource?: str
   const r = (source: string, billing: AuthClass["billing"], possibleCharges: AuthClass["possibleCharges"]): AuthClass =>
     ({ source, billing, apiKeyOverridesSubscription: (keyed || initKeyed) && billing === "api", possibleCharges, ...raw });
   // Any non-empty cloud flag (even "0") counts as cloud: presence-only and deliberately conservative.
-  const cloud = ["CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"].find((k) => e[k]);
+  const cloud = CLOUD_ENV.find((k) => e[k]);
   if (cloud) return r(cloud, "cloud", true);
   if (e.ANTHROPIC_AUTH_TOKEN) return r("ANTHROPIC_AUTH_TOKEN", "api", true);
   if (e.ANTHROPIC_API_KEY) return r("ANTHROPIC_API_KEY", "api", true);
@@ -77,13 +85,16 @@ export function parseRateLimit(e: any): RateLimit {
 }
 
 /** Extra CLI args that route every tool call through the gate hook and make un-approved actions fail explicitly. */
-export function buildGateArgs(gateScript: string, policyPath: string): string[] {
+export function buildGateArgs(gateScript: string, policyPath: string, o: { withholdFileTools: boolean }): string[] {
   // Exec form (program + args, no shell, so no Git Bash dependency). Unverified live.
   // onFailure:"block": only exit 2 blocks by default; any other hook failure (missing script, timeout) would let the tool run.
   const settings = { hooks: { PreToolUse: [{ matcher: "*", hooks: [{ type: "command", command: process.execPath, args: [gateScript, policyPath], onFailure: "block" }] }] } };
   // Deny rules for the classes the gate always denies; they apply regardless of hooks. ponytail: "mcp__*" wildcard form unverified live.
-  // --disallowedTools is variadic: it must stay the LAST arg or it would swallow following args.
-  return ["--settings", JSON.stringify(settings), "--permission-prompts", "none", "--disallowedTools", GATE_DENIED_TOOLS.join(",")];
+  // --tools (allowlist; "" = no tools) and --disallowedTools are both variadic: they must stay the LAST args, each given one comma-joined value.
+  // withholdFileTools: hooks cannot be verified to run (see scanHookTrust), so file tools must not exist for the model at all.
+  const denied = o.withholdFileTools ? [...GATE_DENIED_TOOLS, ...FILE_TOOLS] : GATE_DENIED_TOOLS;
+  // --strict-mcp-config alone (no --mcp-config) loads no MCP servers at all.
+  return ["--settings", JSON.stringify(settings), "--strict-mcp-config", "--permission-prompts", "none", "--tools", o.withholdFileTools ? "" : GATE_TOOLS.join(","), "--disallowedTools", denied.join(",")];
 }
 
 export interface Located {
@@ -151,6 +162,7 @@ export interface RunResult {
   toolUses: { name: string; id: string }[];
   result?: { subtype?: string; isError?: boolean };
   apiKeySource?: string; // raw system/init value
+  tools?: string[]; // system/init tool names the CLI actually exposed
   rateLimits: RateLimit[];
   costUsdEstimate?: number; // result.total_cost_usd: client-side list-price estimate, NOT a bill
   malformedLines: number;
@@ -179,6 +191,7 @@ function killTree(child: ChildProcess): void {
 export function runClaude(o: {
   exe: string;
   prefixArgs?: string[];
+  cwd?: string;
   extraArgs?: string[]; // e.g. buildGateArgs(); appended after the standard flags
   prompt: string;
   model?: string;
@@ -197,7 +210,7 @@ export function runClaude(o: {
   if (o.model) args.push("--model", o.model);
   if (o.resume) args.push("--resume", o.resume);
   args.push(...(o.extraArgs ?? []));
-  if (forbiddenExtraArgs(o.extraArgs ?? [])) {
+  if (forbiddenExtraArgs([...(o.prefixArgs ?? []), ...(o.extraArgs ?? [])])) {
     r.spawnError = "refused: argument would bypass or disable permission enforcement";
     return Promise.resolve(r);
   }
@@ -205,7 +218,7 @@ export function runClaude(o: {
     r.spawnError = "refused: env var would disable hooks";
     return Promise.resolve(r);
   }
-  const inherited = Object.fromEntries(Object.entries(process.env).filter(([k]) => !HOOK_OFF_ENV.includes(norm(k))));
+  const inherited = Object.fromEntries(Object.entries(process.env).filter(([k]) => !HOOK_OFF_ENV.includes(norm(k)) && !PARENT_SESSION_ENV.includes(norm(k))));
   return new Promise((resolve) => {
     if (o.signal?.aborted) {
       r.cancelled = true;
@@ -213,7 +226,7 @@ export function runClaude(o: {
     }
     let child: ChildProcess;
     try {
-      child = spawn(o.exe, args, { shell: false, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], env: { ...inherited, ...NO_UPDATE, ...o.env } });
+      child = spawn(o.exe, args, { ...(o.cwd ? { cwd: o.cwd } : {}), shell: false, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], env: { ...inherited, ...NO_UPDATE, ...o.env } });
     } catch (e) {
       r.spawnError = String((e as NodeJS.ErrnoException).code ?? e);
       return resolve(r);
@@ -256,6 +269,7 @@ export function runClaude(o: {
       if (e.type === "system" && e.subtype === "init") {
         if (typeof e.model === "string") r.model = e.model;
         if (typeof e.apiKeySource === "string") r.apiKeySource = e.apiKeySource;
+        if (Array.isArray(e.tools)) r.tools = e.tools.filter((t: unknown) => typeof t === "string");
       }
       if (e.type === "rate_limit_event") r.rateLimits.push(parseRateLimit(e));
       if (e.type === "assistant" && Array.isArray(e.message?.content))
@@ -332,11 +346,14 @@ if (isMain) {
     out.fingerprint = await fingerprint(located.path, { env: process.env, homedir, cwd: process.cwd() });
     if (opt.live) {
       const gateScript = path.join(import.meta.dirname, "claude-gate" + path.extname(import.meta.filename));
+      // Fail closed: file tools are withheld unless the scan positively finds nothing that could stop the hook.
+      const hookTrust = scanHookTrust({ env: process.env, cwd: process.cwd(), home: homedir, platform: process.platform });
+      out.hookTrust = hookTrust;
       const base = {
         exe: located.path,
         timeoutMs: 120_000,
         ...(opt.model ? { model: opt.model } : {}),
-        ...(opt.gate ? { extraArgs: buildGateArgs(gateScript, path.resolve(opt.gate)) } : {}),
+        ...(opt.gate ? { extraArgs: buildGateArgs(gateScript, path.resolve(opt.gate), { withholdFileTools: !hookTrust.trusted }) } : {}),
       };
       const a = await runClaude({ ...base, prompt: "Reply with exactly: OK" });
       const b = await runClaude({ ...base, prompt: "Reply with exactly: OK again", ...(a.sessionId ? { resume: a.sessionId } : {}) });

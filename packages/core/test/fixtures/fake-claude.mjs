@@ -7,8 +7,9 @@ const val = (f) => (argv.includes(f) ? argv[argv.indexOf(f) + 1] : undefined);
 const mode = process.env.FAKE_CLAUDE_MODE ?? "ok";
 if (process.env.FAKE_CLAUDE_MARKER) fs.writeFileSync(process.env.FAKE_CLAUDE_MARKER, "spawned");
 if (process.env.FAKE_CLAUDE_ENVOUT) fs.writeFileSync(process.env.FAKE_CLAUDE_ENVOUT, JSON.stringify([process.env.CLAUDE_CODE_SIMPLE, process.env.CLAUDE_CODE_SAFE_MODE]));
+if (process.env.FAKE_CLAUDE_PARENTOUT) fs.writeFileSync(process.env.FAKE_CLAUDE_PARENTOUT, JSON.stringify(["CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_PID"].map((k) => process.env[k] ?? null)));
 const emit = (o) => process.stdout.write(JSON.stringify(o) + "\n");
-const init = { type: "system", subtype: "init", session_id: val("--resume") ?? "sess-1", model: val("--model") ?? "default", tools: [] };
+const init = { type: "system", subtype: "init", session_id: val("--resume") ?? "sess-1", model: val("--model") ?? "default", tools: [], ...(process.env.FAKE_CLAUDE_APIKEYSOURCE ? { apiKeySource: process.env.FAKE_CLAUDE_APIKEYSOURCE } : {}) };
 
 if (mode === "fail") {
   process.stderr.write("boom\n");
@@ -29,27 +30,57 @@ if (mode === "hang") {
   emit({ type: "result", subtype: "success", is_error: false, session_id: init.session_id, total_cost_usd: 0.0123 });
 } else if (mode === "hook") {
   // Emulates Claude Code: run the PreToolUse hook from --settings; "execute" (write the marker) only on an explicit allow.
-  const tool = JSON.parse(process.env.FAKE_CLAUDE_TOOL);
+  // Tool comes from FAKE_CLAUDE_TOOL, else is derived from the scenario-runner prompt ("Use the Read|Write tool ... <path>", "shell tool ... > <path>").
+  const prompt = val("-p") ?? "";
+  const pth = prompt.match(/(?:[A-Za-z]:\\|\/)[^\s"]+/)?.[0]; // Windows drive path or POSIX absolute path
+  let tool = process.env.FAKE_CLAUDE_TOOL ? JSON.parse(process.env.FAKE_CLAUDE_TOOL) : undefined;
+  const derived = !tool;
+  if (derived) {
+    const name = /shell tool/.test(prompt) ? "Bash" : prompt.match(/Use the (\w+) tool/)?.[1];
+    tool = { tool_name: name, tool_input: name === "Bash" ? { command: `echo x > ${pth}` } : { file_path: pth, ...(name === "Write" ? { content: "x" } : {}) } };
+  }
   // Models the documented contract: exit 2 blocks; exit 0 + JSON decision applies; other non-zero exit is NON-blocking
   // (tool proceeds) unless the handler has onFailure:"block"; exit 0 with unparseable stdout = no decision = proceeds
   // (unverified assumption).
   const handler = JSON.parse(val("--settings")).hooks.PreToolUse[0].hooks[0];
-  const h = spawnSync(handler.command, handler.args ?? [], { input: JSON.stringify({ hook_event_name: "PreToolUse", cwd: process.cwd(), tool_use_id: "tu1", ...tool }), encoding: "utf8", shell: false });
+  // --tools is an allowlist ("" = none) and --disallowedTools a denylist; either removes the tool before any hook.
+  // A project disableAllHooks skips the hook entirely (the hole the scan guards).
+  const ALL = ["Read", "Glob", "Grep", "Write", "Edit", "NotebookEdit", "Bash", "PowerShell", "Monitor", "WebFetch", "WebSearch", "Task"];
+  const flag = val("--tools");
+  const denyList = (val("--disallowedTools") ?? "").split(",");
+  const exposed = (flag === undefined || flag === "default" ? ALL : flag.split(/[,\s]+/).filter(Boolean)).filter((n) => !denyList.includes(n));
+  const withheld = (flag !== undefined && flag !== "default" && !flag.split(/[,\s]+/).includes(tool.tool_name)) || denyList.includes(tool.tool_name);
+  let hooksOff = false;
+  try {
+    hooksOff = !!JSON.parse(fs.readFileSync(".claude/settings.json", "utf8")).disableAllHooks;
+  } catch {
+    // no project settings
+  }
   let allowed;
-  if (h.status === 2) allowed = false;
-  else if (h.status !== 0) allowed = handler.onFailure !== "block";
+  if (withheld) allowed = false;
+  else if (hooksOff) allowed = true;
   else {
-    try {
-      allowed = JSON.parse(h.stdout).hookSpecificOutput.permissionDecision !== "deny";
-    } catch {
-      allowed = true;
+    const h = spawnSync(handler.command, handler.args ?? [], { input: JSON.stringify({ hook_event_name: "PreToolUse", cwd: process.cwd(), tool_use_id: "tu1", ...tool }), encoding: "utf8", shell: false });
+    if (h.status === 2) allowed = false;
+    else if (h.status !== 0) allowed = handler.onFailure !== "block";
+    else {
+      try {
+        allowed = JSON.parse(h.stdout).hookSpecificOutput.permissionDecision !== "deny";
+      } catch {
+        allowed = true;
+      }
     }
   }
-  if (allowed) fs.writeFileSync(process.env.FAKE_CLAUDE_EXECUTED, "executed");
-  emit(init);
+  let content = "";
+  if (allowed && process.env.FAKE_CLAUDE_EXECUTED) fs.writeFileSync(process.env.FAKE_CLAUDE_EXECUTED, "executed");
+  if (allowed && derived) {
+    if (tool.tool_name === "Read") content = fs.readFileSync(pth, "utf8");
+    else fs.writeFileSync(pth, "x"); // Write / Bash
+  }
+  emit({ ...init, tools: exposed });
   emit({ type: "assistant", session_id: init.session_id, message: { content: [{ type: "tool_use", id: "tu1", name: tool.tool_name, input: tool.tool_input }] } });
-  emit({ type: "user", session_id: init.session_id, message: { content: [{ type: "tool_result", tool_use_id: "tu1", is_error: !allowed }] } });
-  emit({ type: "result", subtype: "success", is_error: false, session_id: init.session_id });
+  emit({ type: "user", session_id: init.session_id, message: { content: [{ type: "tool_result", tool_use_id: "tu1", is_error: !allowed, content: allowed ? content : "denied" }] } });
+  emit({ type: "result", subtype: "success", is_error: false, session_id: init.session_id, result: content, permission_denials: allowed ? [] : [{ tool_name: tool.tool_name }] });
 } else {
   emit(init);
   if (mode === "malformed") process.stdout.write("not json\n");

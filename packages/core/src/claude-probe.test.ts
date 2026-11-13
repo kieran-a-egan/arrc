@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { CLOUD_ENV } from "./claude-trust.ts";
 import { buildGateArgs, classifyAuth, fingerprint, locateClaude, runClaude } from "./claude-probe.ts";
 
 const win = process.platform === "win32";
@@ -239,6 +240,7 @@ test("classifyAuth follows documented precedence, presence only", () => {
   const none = classifyAuth({});
   assert.deepEqual([none.billing, none.possibleCharges, none.apiKeyOverridesSubscription], ["unknown", "unknown", false]);
   assert.equal(classifyAuth({ CLAUDE_CODE_USE_BEDROCK: "1", ANTHROPIC_API_KEY: "k" }).billing, "cloud");
+  for (const k of CLOUD_ENV) assert.equal(classifyAuth({ [k]: "1" }).billing, "cloud", k);
   // Env names are case-insensitive on Windows only.
   assert.equal(classifyAuth({ anthropic_auth_token: "t" }).source, win ? "ANTHROPIC_AUTH_TOKEN" : "unknown");
   const sub = classifyAuth({ CLAUDE_CODE_OAUTH_TOKEN: "t" });
@@ -266,9 +268,18 @@ test("runClaude records init apiKeySource, rate limits (unknown when absent) and
 
 test("runClaude refuses args that bypass or disable permission enforcement, without spawning", async (t) => {
   const marker = path.join(tmp(t), "marker");
-  for (const extra of [["--dangerously-skip-permissions"], ["--allow-dangerously-skip-permissions"], ["--permission-mode", "bypassPermissions"], ["--bare"], ["--safe-mode"], ["--managed-settings", "{}"], ["--managed-settings={}"], ["--bare=1"], ["--dangerously-skip-permissions=true"], ["--permission-mode=bypassPermissions"], ["--setting-sources", "user"], ["--setting-sources=user"], ["--settings", "{}", "--settings", "{}"], ["--settings=a", "--settings", "b"]]) {
+  for (const extra of [["--dangerously-skip-permissions"], ["--allow-dangerously-skip-permissions"], ["--permission-mode", "bypassPermissions"], ["--bare"], ["--safe-mode"], ["--managed-settings", "{}"], ["--managed-settings={}"], ["--bare=1"], ["--dangerously-skip-permissions=true"], ["--permission-mode=bypassPermissions"], ["--setting-sources", "user"], ["--setting-sources=user"], ["--settings", "{}", "--settings", "{}"], ["--settings=a", "--settings", "b"], ["--tools=a", "--tools", "b"], ["--disallowedTools", "a", "--disallowedTools=b"], ["--mcp-config", "a", "--mcp-config=b"], ["--permission-mode", "acceptEdits"], ["--permission-mode=auto"], ["--permission-mode", "auto"], ["--project-config-root", "x"]]) {
     const r = await runClaude({ ...base, extraArgs: extra, env: { FAKE_CLAUDE_MARKER: marker } });
     assert.match(r.spawnError ?? "", /refused/, extra.join(" "));
+  }
+  assert.equal(fs.existsSync(marker), false);
+});
+
+test("runClaude refuses forbidden args smuggled through prefixArgs, without spawning", async (t) => {
+  const marker = path.join(tmp(t), "marker");
+  for (const pre of [["--bare"], ["--dangerously-skip-permissions"], ["--setting-sources", "user"], ["--permission-mode", "bypassPermissions"]]) {
+    const r = await runClaude({ ...base, prefixArgs: [fixture, ...pre], env: { FAKE_CLAUDE_MARKER: marker } });
+    assert.match(r.spawnError ?? "", /refused/, pre.join(" "));
   }
   assert.equal(fs.existsSync(marker), false);
 });
@@ -310,23 +321,53 @@ test("runClaude refuses caller env that disables hooks, and strips it from the i
   }
 });
 
+test("runClaude strips parent Claude Code session env from the child", async (t) => {
+  const out = path.join(tmp(t), "parentout");
+  const names = ["CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_PID"];
+  const prev = names.map((k) => process.env[k]);
+  for (const k of names) process.env[k] = "x";
+  try {
+    assert.equal((await runClaude({ ...base, env: { FAKE_CLAUDE_PARENTOUT: out } })).exitCode, 0);
+  } finally {
+    names.forEach((k, i) => (prev[i] === undefined ? delete process.env[k] : (process.env[k] = prev[i])));
+  }
+  assert.deepEqual(JSON.parse(fs.readFileSync(out, "utf8")), names.map(() => null));
+});
+
 test("runClaude only inspects extraArgs, not the prompt", async () => {
   const r = await runClaude({ ...base, prompt: "explain --bare mode and bypassPermissions" });
   assert.equal(r.spawnError, undefined);
   assert.equal(r.exitCode, 0);
 });
 
-test("buildGateArgs wires a PreToolUse hook and no-prompt mode", () => {
-  const a = buildGateArgs("C:\\g\\claude-gate.ts", "C:\\p\\policy.json");
-  assert.equal(a[2], "--permission-prompts");
-  assert.equal(a[3], "none");
+test("buildGateArgs wires a PreToolUse hook, no-prompt mode and an allowlist; variadic flags stay last", () => {
+  const a = buildGateArgs("C:\\g\\claude-gate.ts", "C:\\p\\policy.json", { withholdFileTools: false });
+  const w = buildGateArgs("C:\\g\\claude-gate.ts", "C:\\p\\policy.json", { withholdFileTools: true });
+  assert.deepEqual(a.slice(2, 8), ["--strict-mcp-config", "--permission-prompts", "none", "--tools", "Read,Glob,Grep,Write,Edit,NotebookEdit", "--disallowedTools"]);
+  assert.deepEqual(w.slice(2, 8), ["--strict-mcp-config", "--permission-prompts", "none", "--tools", "", "--disallowedTools"]); // empty allowlist: a single "" argv element
+  assert.equal(a.length, 9);
+  assert.equal(w.length, 9);
+  for (const t of ["Read", "Glob", "Grep", "Write", "Edit", "MultiEdit", "NotebookEdit", "NotebookRead", "LS", "Bash", "Monitor"]) assert.ok(w[8]!.split(",").includes(t), t);
+  assert.ok(!a[8]!.split(",").includes("Read"));
   const h = JSON.parse(a[1]!).hooks.PreToolUse[0];
   assert.equal(h.matcher, "*");
   assert.equal(h.hooks[0].command, process.execPath);
   assert.deepEqual(h.hooks[0].args, ["C:\\g\\claude-gate.ts", "C:\\p\\policy.json"]);
   assert.equal(h.hooks[0].onFailure, "block");
-  assert.equal(a[4], "--disallowedTools");
-  for (const t of ["Bash", "PowerShell", "WebFetch", "WebSearch", "Task", "Agent", "mcp__*", "ListMcpResourcesTool", "ReadMcpResourceTool"]) assert.ok(a[5]!.split(",").includes(t), t);
+  for (const t of ["Bash", "PowerShell", "Monitor", "WebFetch", "WebSearch", "Task", "Agent", "mcp__*", "ListMcpResourcesTool", "ReadMcpResourceTool"]) assert.ok(a[8]!.split(",").includes(t), t);
+});
+
+test("runClaude refuses --project-config-root (it relocates the settings the trust scan checked)", async () => {
+  for (const extraArgs of [["--project-config-root", "C:\\x"], ["--project-config-root=C:\\x"]]) {
+    const r = await runClaude({ ...base, extraArgs });
+    assert.match(r.spawnError ?? "", /refused/);
+  }
+});
+
+test("runClaude records the init event's tools list", async () => {
+  const tool = JSON.stringify({ tool_name: "Read", tool_input: { file_path: "C:\\x" } });
+  const r = await runClaude({ ...base, extraArgs: buildGateArgs(gatePath, "C:\\p\\policy.json", { withholdFileTools: false }), env: { FAKE_CLAUDE_MODE: "hook", FAKE_CLAUDE_TOOL: tool } });
+  assert.deepEqual(r.tools, ["Read", "Glob", "Grep", "Write", "Edit", "NotebookEdit"]);
 });
 
 test("fixture models fail-open: a broken hook blocks only with onFailure:block", async (t) => {
@@ -348,7 +389,7 @@ test("fixture: tool runs only when the gate hook allows it (interception before 
   const policyPath = path.join(dir, "policy.json");
   const principals = [{ kind: "model", id: "claude-code" }];
   fs.writeFileSync(policyPath, JSON.stringify({ schemaVersion: 1, policyId: "p1", rules: [{ ruleId: "r", effect: "allow", principals, operation: "fs.read", target: { root: "C:\\work" } }] }));
-  const extraArgs = buildGateArgs(gatePath, policyPath);
+  const extraArgs = buildGateArgs(gatePath, policyPath, { withholdFileTools: false });
   const go = async (tool: object) => {
     const executed = path.join(dir, `executed-${Math.random()}`);
     const r = await runClaude({ ...base, extraArgs, env: { FAKE_CLAUDE_MODE: "hook", FAKE_CLAUDE_TOOL: JSON.stringify(tool), FAKE_CLAUDE_EXECUTED: executed } });
