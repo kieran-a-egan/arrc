@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { tmp } from "./conformance-support.ts";
 import { CLOUD_ENV } from "./claude-trust.ts";
 import { buildGateArgs, classifyAuth, fingerprint, locateClaude, runClaude } from "./claude-probe.ts";
 
@@ -15,11 +16,6 @@ const fixture = path.join(import.meta.dirname, "..", "test", "fixtures", "fake-c
 const run = promisify(execFile);
 const base = { exe: process.execPath, prefixArgs: [fixture], prompt: "hi", timeoutMs: 10_000 };
 
-function tmp(t: { after: (f: () => void) => void }): string {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "arrc probe "));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  return root;
-}
 const alive = (pid: number) => {
   try {
     process.kill(pid, 0);

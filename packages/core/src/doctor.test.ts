@@ -2,9 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { tmp } from "./conformance-support.ts";
 import { CAPABILITY_IDS, npmInstall, resolveCommand, runDoctor, runVersion, satisfies, type Ctx } from "./doctor.ts";
 
 const win = process.platform === "win32";
@@ -12,9 +12,7 @@ const doctorPath = path.join(import.meta.dirname, "doctor.ts");
 const run = promisify(execFile);
 
 function spacedDir(t: { after: (f: () => void) => void }): string {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "arrc doctor "));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const dir = path.join(root, "with space");
+  const dir = path.join(tmp(t, "arrc doctor "), "with space");
   fs.mkdirSync(dir);
   return dir;
 }

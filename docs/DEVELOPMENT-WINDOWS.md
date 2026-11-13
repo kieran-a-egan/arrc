@@ -45,3 +45,25 @@ The version commands require those tools to be installed.
 - Security containment must be capability-verified; worktrees do not provide hostile-code isolation.
 
 For the project's initial issue order, see [ROADMAP.md](ROADMAP.md).
+
+## Launch matrix (`packages/core/src/launch.ts`, `planLaunch`)
+
+Every launch uses `shell: false`. A shell is never inferred; only a named interpreter for a `.ps1`.
+
+| File | Status | How / why |
+| --- | --- | --- |
+| `.exe` | supported | Spawned directly. Unicode and space paths/args are covered by tests. |
+| `.ps1` | supported with explicit `shell: "pwsh"` or `"powershell"` | `pwsh` / `powershell.exe -NoProfile -NonInteractive -File <script> args`. No `-ExecutionPolicy` override. No shell given: `shell_required_for_ps1`. |
+| `.cmd`, `.bat` | unsupported (`blocked_cmd_shim`) | Node refuses them with `shell: false` (EINVAL, CVE-2024-27980); `shell: true` cannot safely escape cmd metacharacters. |
+| other extension, relative path | blocked | `unsupported_extension`, `path_not_absolute`. No PATHEXT lookup. |
+
+Test offline, no subscription or network (needs only `npm ci`): `npm test` in PowerShell 7 (`pwsh`) and again with `powershell.exe -NoProfile -Command "npm test"` (Windows PowerShell 5.1). CI runs both on Windows. `.ps1` cases are skipped off Windows only, so a missing shell fails them on the Windows runner.
+
+Notes:
+
+- "Supported" means the launcher can run it, not that policy allows it. The policy ceiling currently refuses all `.ps1`, `pwsh`, `powershell` and `cmd` launches and all non-ASCII paths (`invalid_target` / `ceiling_violation`); every launch must still pass `decide()`.
+- The native launcher (`planLaunch`/`runLaunch`) is Windows-only and unsupported on other platforms: it returns `path_not_absolute` for POSIX paths, and its tests are skipped off Windows (the external `claude-external` conformance cases still run on Linux CI).
+- Interpreters are spawned by absolute path (`powershell.exe` from `%SystemRoot%\System32\WindowsPowerShell\v1.0`, `pwsh` from an absolute `PATH` entry; none found: `shell_not_found`) so a planted exe in the cwd cannot win. Only drive-absolute paths are accepted (no UNC, `\\?\`, ADS or drive-relative).
+- On a stock Windows client the 5.1 execution policy may be `Restricted`, which fails the `.ps1` via `powershell` test. Fix: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`. The code never passes `-ExecutionPolicy Bypass`.
+- Arguments after `-File` are bound by PowerShell, not passed as raw argv: `--%` is dropped, `-x:y` is split, and a `param()` block binds `-Name` arguments. Plain strings (quotes, trailing backslash, empty, `-Command`) arrive literally.
+- `runLaunch` caps each of stdout/stderr at 1 MiB (`truncated: true`) and, after exit or kill, waits 2 s for `close` before dropping pipes held by orphaned grandchildren.
