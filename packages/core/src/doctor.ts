@@ -54,11 +54,13 @@ function isFile(p: string): boolean {
 }
 
 // Manual PATH scan: never executes anything and never searches cwd.
-export function resolveCommand(name: string, ctx: Ctx): string | undefined {
+export function resolveCommand(name: string, ctx: Ctx, onlyExt?: string): string | undefined {
   const win = ctx.platform === "win32";
   const delim = win ? ";" : ":";
   const exts = win
-    ? (envGet(ctx, "PATHEXT") ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean)
+    ? onlyExt
+      ? [onlyExt]
+      : (envGet(ctx, "PATHEXT") ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean)
     : [""];
   for (const raw of (envGet(ctx, "PATH") ?? "").split(delim)) {
     const dir = raw.trim().replace(/^"(.*)"$/, "$1");
@@ -69,6 +71,18 @@ export function resolveCommand(name: string, ctx: Ctx): string | undefined {
     }
   }
   return undefined;
+}
+
+// Prefer a native exe (PATH .exe, then ~/.local/bin) so a .cmd shim earlier on PATH can't block it;
+// else report whatever the full PATH scan found (a shim: blocked in the probe, unverified in doctor).
+export function locateClaudeExe(ctx: Ctx, home: string | undefined): string | undefined {
+  const win = ctx.platform === "win32";
+  const fallback = home ? path.join(home, ".local", "bin", win ? "claude.exe" : "claude") : undefined;
+  return (
+    resolveCommand("claude", ctx, win ? ".EXE" : undefined) ??
+    (fallback && isFile(fallback) ? fallback : undefined) ??
+    resolveCommand("claude", ctx)
+  );
 }
 
 interface Run {
@@ -301,8 +315,7 @@ export async function runDoctor(
   // claude.cli
   {
     const home = win ? envGet(ctx, "USERPROFILE") : envGet(ctx, "HOME");
-    const fallback = home ? path.join(home, ".local", "bin", win ? "claude.exe" : "claude") : undefined;
-    const claude = resolveCommand("claude", ctx) ?? (fallback && isFile(fallback) ? fallback : undefined);
+    const claude = locateClaudeExe(ctx, home);
     if (claude) {
       const r = await runVersion(claude, ["--version"], {
         DISABLE_AUTOUPDATER: "1",
