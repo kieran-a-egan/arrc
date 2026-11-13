@@ -5,9 +5,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { fingerprint, locateClaude, runClaude } from "./claude-probe.ts";
+import { buildGateArgs, classifyAuth, fingerprint, locateClaude, runClaude } from "./claude-probe.ts";
 
 const win = process.platform === "win32";
+const gatePath = path.join(import.meta.dirname, "claude-gate.ts");
 const probePath = path.join(import.meta.dirname, "claude-probe.ts");
 const fixture = path.join(import.meta.dirname, "..", "test", "fixtures", "fake-claude.mjs");
 const run = promisify(execFile);
@@ -230,8 +231,142 @@ test("runClaude spawn failure leaves exitCode null", async () => {
   assert.equal(r.exitCode, null);
 });
 
+test("classifyAuth follows documented precedence, presence only", () => {
+  const key = { ANTHROPIC_API_KEY: "sk-SECRET", CLAUDE_CODE_OAUTH_TOKEN: "oauth-SECRET" };
+  const a = classifyAuth(key);
+  assert.deepEqual([a.billing, a.source, a.apiKeyOverridesSubscription, a.possibleCharges], ["api", "ANTHROPIC_API_KEY", true, true]);
+  assert.ok(!JSON.stringify(a).includes("SECRET"));
+  const none = classifyAuth({});
+  assert.deepEqual([none.billing, none.possibleCharges, none.apiKeyOverridesSubscription], ["unknown", "unknown", false]);
+  assert.equal(classifyAuth({ CLAUDE_CODE_USE_BEDROCK: "1", ANTHROPIC_API_KEY: "k" }).billing, "cloud");
+  // Env names are case-insensitive on Windows only.
+  assert.equal(classifyAuth({ anthropic_auth_token: "t" }).source, win ? "ANTHROPIC_AUTH_TOKEN" : "unknown");
+  const sub = classifyAuth({ CLAUDE_CODE_OAUTH_TOKEN: "t" });
+  assert.deepEqual([sub.billing, sub.possibleCharges, sub.apiKeyOverridesSubscription], ["subscription", "unknown", false]);
+  assert.equal(classifyAuth({}, { apiKeySource: "apiKeyHelper" }).billing, "api");
+  for (const s of ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]) {
+    const k = classifyAuth({}, { apiKeySource: s });
+    assert.deepEqual([k.billing, k.possibleCharges, k.source, k.apiKeySource, k.apiKeyOverridesSubscription], ["api", true, s, s, true]);
+  }
+  const raw = classifyAuth({}, { apiKeySource: "/login managed key" });
+  assert.deepEqual([raw.billing, raw.apiKeySource], ["unknown", "/login managed key"]);
+});
+
+test("runClaude records init apiKeySource, rate limits (unknown when absent) and cost estimate", async () => {
+  const r = await runClaude({ ...base, env: { FAKE_CLAUDE_MODE: "limits" } });
+  assert.equal(r.apiKeySource, "none");
+  assert.deepEqual(r.rateLimits, [
+    { status: "allowed_warning", resetsAt: 1790000000, rateLimitType: "five_hour", utilization: 0.82 },
+    { status: "allowed", resetsAt: "unknown", rateLimitType: "unknown", utilization: "unknown" },
+    { status: "unknown", resetsAt: "unknown", rateLimitType: "unknown", utilization: "unknown" },
+  ]);
+  assert.equal(r.costUsdEstimate, 0.0123);
+  assert.equal((await runClaude(base)).rateLimits.length, 0);
+});
+
+test("runClaude refuses args that bypass or disable permission enforcement, without spawning", async (t) => {
+  const marker = path.join(tmp(t), "marker");
+  for (const extra of [["--dangerously-skip-permissions"], ["--allow-dangerously-skip-permissions"], ["--permission-mode", "bypassPermissions"], ["--bare"], ["--safe-mode"], ["--managed-settings", "{}"], ["--managed-settings={}"], ["--bare=1"], ["--dangerously-skip-permissions=true"], ["--permission-mode=bypassPermissions"], ["--setting-sources", "user"], ["--setting-sources=user"], ["--settings", "{}", "--settings", "{}"], ["--settings=a", "--settings", "b"]]) {
+    const r = await runClaude({ ...base, extraArgs: extra, env: { FAKE_CLAUDE_MARKER: marker } });
+    assert.match(r.spawnError ?? "", /refused/, extra.join(" "));
+  }
+  assert.equal(fs.existsSync(marker), false);
+});
+
+test("runClaude refuses caller env that disables hooks, and strips it from the inherited env", async (t) => {
+  const dir = tmp(t);
+  const marker = path.join(dir, "marker");
+  for (const k of ["CLAUDE_CODE_SAFE_MODE", "CLAUDE_CODE_SIMPLE", ...(win ? ["claude_code_safe_mode"] : [])]) {
+    const r = await runClaude({ ...base, env: { [k]: "0", FAKE_CLAUDE_MARKER: marker } });
+    assert.match(r.spawnError ?? "", /refused/, k);
+  }
+  assert.equal(fs.existsSync(marker), false);
+  const out = path.join(dir, "envout");
+  const prev = [process.env.CLAUDE_CODE_SIMPLE, process.env.CLAUDE_CODE_SAFE_MODE];
+  process.env.CLAUDE_CODE_SIMPLE = "1";
+  process.env.CLAUDE_CODE_SAFE_MODE = "1";
+  try {
+    const r = await runClaude({ ...base, env: { FAKE_CLAUDE_ENVOUT: out } });
+    assert.equal(r.exitCode, 0);
+  } finally {
+    for (const [k, v] of [["CLAUDE_CODE_SIMPLE", prev[0]], ["CLAUDE_CODE_SAFE_MODE", prev[1]]] as const) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+  assert.deepEqual(JSON.parse(fs.readFileSync(out, "utf8")), [null, null]);
+  if (win) {
+    // inherited lowercase key: the child's env lookup is case-insensitive on Windows, so it would see it if not stripped
+    const prevLc = process.env.claude_code_simple;
+    process.env.claude_code_simple = "1";
+    try {
+      const r = await runClaude({ ...base, env: { FAKE_CLAUDE_ENVOUT: out } });
+      assert.equal(r.exitCode, 0);
+    } finally {
+      if (prevLc === undefined) delete process.env.claude_code_simple;
+      else process.env.claude_code_simple = prevLc;
+    }
+    assert.deepEqual(JSON.parse(fs.readFileSync(out, "utf8")), [null, null]);
+  }
+});
+
+test("runClaude only inspects extraArgs, not the prompt", async () => {
+  const r = await runClaude({ ...base, prompt: "explain --bare mode and bypassPermissions" });
+  assert.equal(r.spawnError, undefined);
+  assert.equal(r.exitCode, 0);
+});
+
+test("buildGateArgs wires a PreToolUse hook and no-prompt mode", () => {
+  const a = buildGateArgs("C:\\g\\claude-gate.ts", "C:\\p\\policy.json");
+  assert.equal(a[2], "--permission-prompts");
+  assert.equal(a[3], "none");
+  const h = JSON.parse(a[1]!).hooks.PreToolUse[0];
+  assert.equal(h.matcher, "*");
+  assert.equal(h.hooks[0].command, process.execPath);
+  assert.deepEqual(h.hooks[0].args, ["C:\\g\\claude-gate.ts", "C:\\p\\policy.json"]);
+  assert.equal(h.hooks[0].onFailure, "block");
+  assert.equal(a[4], "--disallowedTools");
+  for (const t of ["Bash", "PowerShell", "WebFetch", "WebSearch", "Task", "Agent", "mcp__*", "ListMcpResourcesTool", "ReadMcpResourceTool"]) assert.ok(a[5]!.split(",").includes(t), t);
+});
+
+test("fixture models fail-open: a broken hook blocks only with onFailure:block", async (t) => {
+  const dir = tmp(t);
+  const settings = (onFailure?: string) =>
+    JSON.stringify({ hooks: { PreToolUse: [{ matcher: "*", hooks: [{ type: "command", command: process.execPath, args: [path.join(dir, "missing.js")], ...(onFailure ? { onFailure } : {}) }] }] } });
+  const go = async (s: string) => {
+    const executed = path.join(dir, `executed-${Math.random()}`);
+    const tool = { tool_name: "Read", tool_input: { file_path: "C:\\work\\a.txt" } };
+    await runClaude({ ...base, extraArgs: ["--settings", s], env: { FAKE_CLAUDE_MODE: "hook", FAKE_CLAUDE_TOOL: JSON.stringify(tool), FAKE_CLAUDE_EXECUTED: executed } });
+    return fs.existsSync(executed);
+  };
+  assert.equal(await go(settings("block")), false);
+  assert.equal(await go(settings()), true);
+});
+
+test("fixture: tool runs only when the gate hook allows it (interception before execution)", async (t) => {
+  const dir = tmp(t);
+  const policyPath = path.join(dir, "policy.json");
+  const principals = [{ kind: "model", id: "claude-code" }];
+  fs.writeFileSync(policyPath, JSON.stringify({ schemaVersion: 1, policyId: "p1", rules: [{ ruleId: "r", effect: "allow", principals, operation: "fs.read", target: { root: "C:\\work" } }] }));
+  const extraArgs = buildGateArgs(gatePath, policyPath);
+  const go = async (tool: object) => {
+    const executed = path.join(dir, `executed-${Math.random()}`);
+    const r = await runClaude({ ...base, extraArgs, env: { FAKE_CLAUDE_MODE: "hook", FAKE_CLAUDE_TOOL: JSON.stringify(tool), FAKE_CLAUDE_EXECUTED: executed } });
+    assert.equal(r.exitCode, 0, r.stderrTail);
+    return fs.existsSync(executed);
+  };
+  assert.equal(await go({ tool_name: "Read", tool_input: { file_path: "C:\\work\\a.txt" } }), true);
+  assert.equal(await go({ tool_name: "Read", tool_input: { file_path: "C:\\secret\\a.txt" } }), false);
+  assert.equal(await go({ tool_name: "Write", tool_input: { file_path: "C:\\work\\a.txt" } }), false);
+  assert.equal(await go({ tool_name: "Bash", tool_input: { command: "echo hi" } }), false);
+  assert.equal(await go({ tool_name: "mcp__x__y", tool_input: {} }), false);
+  // A broken policy makes the hook exit 2, which must also block.
+  fs.writeFileSync(policyPath, "{broken");
+  assert.equal(await go({ tool_name: "Read", tool_input: { file_path: "C:\\work\\a.txt" } }), false);
+});
+
 test("CLI rejects unknown flags and --exe without a value with exit code 2", async () => {
-  for (const args of [["--bogus"], ["--exe"], ["--exe", "--json"], ["--model"], ["--live", "--model"]])
+  for (const args of [["--bogus"], ["--exe"], ["--exe", "--json"], ["--model"], ["--live", "--model"], ["--gate"], ["--gate", "p.json"]])
     await assert.rejects(run(process.execPath, [probePath, ...args]), (e: { code?: number }) => e.code === 2);
 });
 
