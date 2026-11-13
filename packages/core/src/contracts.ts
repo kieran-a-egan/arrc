@@ -157,9 +157,9 @@ export type ExecutorCapability = z.infer<typeof ExecutorCapability>;
 
 // ---- 4. OperationApproval ----
 
-// ponytail: a parsed grant is NOT proof of authority. Approver authentication, revocation lookup and
-// verifying operationDigest against `operation` are enforcement concerns for the policy milestone (M0-05);
-// consumers must not treat schema validity as authorisation.
+// ponytail: a parsed grant is NOT proof of authority. M0-05 provides binding/digest verification only
+// (`verifyApprovalBinding`); approver authentication, revocation lookup and grant provenance belong to the
+// M1-07 approval broker. Consumers must not treat schema validity as authorisation.
 
 export const OperationApproval = z
   .strictObject({

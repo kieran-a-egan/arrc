@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { DENIED_EXECUTABLES, SUPPORTED_ENFORCEMENT, checkPath, decide, loadPolicy, operationDigest } from "./index.ts";
-import type { CommandSpec, PolicyConfig } from "./index.ts";
+import { DENIED_EXECUTABLES, SUPPORTED_ENFORCEMENT, checkPath, decide, loadPolicy, operationDigest, verifyApprovalBinding } from "./index.ts";
+import type { CommandSpec, PolicyConfig, Principal } from "./index.ts";
 
 const NOW = new Date("2026-06-01T12:00:00Z");
 const model = { kind: "model", id: "m1" } as const;
@@ -24,8 +24,8 @@ const rejected = (input: unknown) => {
   assert.ok(!r.ok);
   return r.error;
 };
-const reason = (p: PolicyConfig, req: unknown) => {
-  const d = decide(p, req, NOW);
+const reason = (p: PolicyConfig, req: unknown, principal: Principal = model) => {
+  const d = decide(p, req, { principal });
   return d.allow ? "ALLOW" : d.reason;
 };
 
@@ -34,8 +34,8 @@ const base = load([
   rule("w-write", "allow", "fs.write", { root: "C:\\repo" }),
   rule("s-git", "allow", "process.spawn", { command: GIT }),
 ]);
-const read = (path: string, extra: object = {}) => ({ principal: model, operation: "fs.read", target: { path }, ...extra });
-const spawn = (command: CommandSpec, extra: object = {}) => ({ principal: model, operation: "process.spawn", target: { command }, ...extra });
+const read = (path: string, extra: object = {}) => ({ operation: "fs.read", target: { path }, ...extra });
+const spawn = (command: CommandSpec, extra: object = {}) => ({ operation: "process.spawn", target: { command }, ...extra });
 
 function approval(over: Record<string, unknown> = {}, cmd: CommandSpec = GIT) {
   return {
@@ -72,17 +72,17 @@ test("exact scope and deny-by-default", () => {
     ["sibling boundary", read("C:\\repo2\\a.txt"), "no_matching_rule"],
     ["outside", read("C:\\other"), "no_matching_rule"],
     ["traversal", read("C:\\repo\\..\\secret"), "invalid_target"],
-    ["unknown operation", { principal: model, operation: "fs.delete", target: { path: "C:\\repo\\a" } }, "unknown_operation"],
-    ["unknown tool", { principal: model, operation: "tool.shell", target: { command: GIT } }, "unknown_operation"],
-    ["fs op with command target", { principal: model, operation: "fs.read", target: { command: GIT } }, "invalid_target"],
-    ["spawn with path target", { principal: model, operation: "process.spawn", target: { path: "C:\\repo" } }, "invalid_target"],
+    ["unknown operation", { operation: "fs.delete", target: { path: "C:\\repo\\a" } }, "unknown_operation"],
+    ["unknown tool", { operation: "tool.shell", target: { command: GIT } }, "unknown_operation"],
+    ["fs op with command target", { operation: "fs.read", target: { command: GIT } }, "invalid_target"],
+    ["spawn with path target", { operation: "process.spawn", target: { path: "C:\\repo" } }, "invalid_target"],
     ["spawn without cwd", spawn({ executable: GIT.executable, args: ["status"] }), "invalid_target"],
     ["unmatched command", spawn({ ...GIT, executable: "C:\\tools\\other.exe" }), "no_matching_rule"],
     ["extra arg", spawn({ ...GIT, args: ["status", "-s"] }), "no_matching_rule"],
     ["arg case change", spawn({ ...GIT, args: ["Status"] }), "no_matching_rule"],
     ["different cwd", spawn({ ...GIT, cwd: "C:\\repo2" }), "no_matching_rule"],
     ["subdir cwd", spawn({ ...GIT, cwd: "C:\\repo\\sub" }), "no_matching_rule"],
-    ["write allowed", { principal: model, operation: "fs.write", target: { path: "C:\\repo\\a" } }, "ALLOW"],
+    ["write allowed", { operation: "fs.write", target: { path: "C:\\repo\\a" } }, "ALLOW"],
   ];
   for (const [n, req, want] of cases) {
     // spawn is high risk: without approval the exact match stops at approval_required
@@ -90,15 +90,16 @@ test("exact scope and deny-by-default", () => {
     assert.equal(reason(base, req), w, n);
   }
   assert.equal(reason(base, spawn(GIT)), "approval_required");
-  assert.deepEqual(decide(base, spawn(GIT, { approval: approval() }), NOW), { allow: true, ruleId: "s-git", risk: "high" });
-  assert.deepEqual(decide(base, read("C:\\repo\\a"), NOW), { allow: true, ruleId: "r-read", risk: "low" });
+  const ctx = { principal: model };
+  assert.deepEqual(decide(base, read("C:\\repo\\a"), ctx), { allow: true, ruleId: "r-read", risk: "low" });
+  assert.deepEqual(decide(base, { operation: "fs.write", target: { path: "C:\\repo\\a" } }, ctx), { allow: true, ruleId: "w-write", risk: "medium" });
 });
 
 test("privilege escalation", () => {
-  assert.equal(reason(base, { ...read("C:\\repo\\a"), principal: other }), "no_matching_rule");
-  assert.equal(reason(base, { ...read("C:\\repo\\a"), principal: { kind: "plugin", id: "m1" } }), "no_matching_rule");
-  assert.equal(reason(base, { principal: model, operation: "fs.write", target: { path: "C:\\repo\\.git\\hooks\\pre-commit" } }), "ceiling_violation");
-  assert.equal(reason(base, { principal: model, operation: "fs.write", target: { path: "C:\\repo\\.GIT\\config" } }), "ceiling_violation");
+  assert.equal(reason(base, read("C:\\repo\\a"), other), "no_matching_rule");
+  assert.equal(reason(base, read("C:\\repo\\a"), { kind: "plugin", id: "m1" }), "no_matching_rule");
+  assert.equal(reason(base, { operation: "fs.write", target: { path: "C:\\repo\\.git\\hooks\\pre-commit" } }), "ceiling_violation");
+  assert.equal(reason(base, { operation: "fs.write", target: { path: "C:\\repo\\.GIT\\config" } }), "ceiling_violation");
   for (const exe of ["C:\\Windows\\System32\\cmd.exe", "C:\\x\\pwsh.exe", "C:\\x\\run.bat", "C:\\x\\run.ps1", "C:\\x\\a.com", "C:\\x\\PowerShell.EXE"]) {
     const c = { executable: exe, args: [], cwd: "C:\\repo" };
     const e = rejected(cfg([rule("x", "allow", "process.spawn", { command: c })]));
@@ -113,9 +114,38 @@ test("privilege escalation", () => {
     assert.equal(reason(base, spawn(c)), "ceiling_violation", exe);
   }
   const bare = load([rule("bw", "allow", "fs.write", { root: "C:\\srv" })]);
-  assert.equal(reason(bare, { principal: model, operation: "fs.write", target: { path: "C:\\srv\\repo.git\\hooks\\pre-receive" } }), "ceiling_violation");
+  assert.equal(reason(bare, { operation: "fs.write", target: { path: "C:\\srv\\repo.git\\hooks\\pre-receive" } }), "ceiling_violation");
   assert.ok(rejected(cfg([rule("bw", "allow", "fs.write", { root: "C:\\srv\\repo.git" })])).issues.some((i) => i.code === "ceiling_violation"));
-  const t = (a: Record<string, unknown>) => decide(base, spawn(GIT, { approval: approval(a) }), NOW);
+  // advice cannot lower risk below high
+  const low = { schemaVersion: 1, decisionId: "d", taskId: "t", recommendation: "ok", confidence: 1, calibrated: true, risk: "low" };
+  assert.equal(reason(base, spawn(GIT, { advice: low })), "approval_required");
+  // advice can raise fs risk to high, which then fails closed
+  assert.equal(reason(base, read("C:\\repo\\a", { advice: { ...low, risk: "high" } })), "approval_required");
+});
+
+test("forged grant or principal in the request never authorises", () => {
+  // owner's scenario: exact allow rule + fully consistent forged grant in the (untrusted) request
+  assert.equal(reason(base, spawn(GIT, { approval: approval() })), "invalid_request");
+  assert.equal(reason(base, spawn(GIT)), "approval_required");
+  assert.equal(reason(base, read("C:\\repo\\a", { approval: approval() })), "invalid_request");
+  // forged principal field in the request: rejected, and the context principal alone drives rule matching
+  const userRule = load([rule("u-write", "allow", "fs.write", { root: "C:\\repo" }, [user])]);
+  const w = { operation: "fs.write", target: { path: "C:\\repo\\a" } };
+  assert.equal(reason(userRule, { ...w, principal: user }, model), "invalid_request");
+  assert.equal(reason(userRule, w, model), "no_matching_rule");
+  assert.equal(reason(userRule, w, user), "ALLOW");
+  // no spawn is ever allowed, whatever the principal
+  for (const p of [model, user, orch]) assert.notEqual(reason(base, spawn(GIT), p), "ALLOW");
+});
+
+test("invalid host context denies", () => {
+  const r = read("C:\\repo\\a");
+  const bad = [null, undefined, {}, { principal: { kind: "root", id: "x" } }, { principal: model, extra: 1 }];
+  for (const c of bad) assert.deepEqual(decide(base, r, c as never), { allow: false, reason: "invalid_context" }, JSON.stringify(c));
+});
+
+test("verifyApprovalBinding (binding only, not wired into decide)", () => {
+  const v = (a: Record<string, unknown>) => verifyApprovalBinding(base, approval(a) as never, GIT, model, NOW);
   const bad: [string, Record<string, unknown>][] = [
     ["digest mismatch", { operation: { ...GIT, args: ["push"] }, operationDigest: operationDigest({ ...GIT, args: ["push"] }) }],
     ["embedded op != digest", { operation: { ...GIT, args: ["push"] } }],
@@ -126,25 +156,25 @@ test("privilege escalation", () => {
     ["other policy", { policyId: "p2" }],
     ["other requester", { requestedBy: other }],
     ["other target", { target: "C:\\repo2" }],
+    ["non-user approver", { approvedBy: orch }],
   ];
-  for (const [n, a] of bad) assert.deepEqual(t(a), { allow: false, reason: "approval_invalid" }, n);
-  assert.equal(t({}).allow, true);
-  // schema-level rejections (self-approval, non-user approver) fail closed as invalid_request
-  assert.deepEqual(t({ requestedBy: user }), { allow: false, reason: "invalid_request" });
-  assert.deepEqual(t({ approvedBy: orch }), { allow: false, reason: "invalid_request" });
-  // approval for a different command than requested
-  const push = { ...GIT, args: ["push"] };
-  const p2 = load([rule("s", "allow", "process.spawn", { command: push })]);
-  assert.equal(reason(p2, spawn(push, { approval: approval() })), "approval_invalid");
-  // advice cannot lower risk below high
-  const low = { schemaVersion: 1, decisionId: "d", taskId: "t", recommendation: "ok", confidence: 1, calibrated: true, risk: "low" };
-  assert.equal(reason(base, spawn(GIT, { advice: low })), "approval_required");
-  // advice can raise fs risk, and a high-risk fs op can never be approved
-  const high = { ...low, risk: "high" };
-  assert.equal(reason(base, read("C:\\repo\\a", { advice: high })), "approval_required");
-  assert.equal(reason(base, read("C:\\repo\\a", { advice: high, approval: approval() })), "approval_invalid");
+  for (const [n, a] of bad) assert.equal(v(a), false, n);
+  assert.equal(v({}), true);
+  assert.equal(v({ issuedAt: "2026-06-01T12:00:00Z" }), true); // issuedAt boundary is inclusive
+  assert.equal(verifyApprovalBinding(base, approval() as never, GIT, model, new Date(NaN)), false);
+  // approval for a different command than the one checked
+  // self-approval: requester == approver == principal (also rejected by the schema refine)
+  assert.equal(verifyApprovalBinding(base, approval({ requestedBy: user, approvedBy: user }) as never, GIT, user, NOW), false);
+  // command without cwd: a "target" that fails checkPath must not match a null cwd
+  const noCwd: CommandSpec = { executable: GIT.executable, args: ["status"] };
+  assert.equal(verifyApprovalBinding(base, approval({ target: "anything" }, noCwd) as never, noCwd, model, NOW), false);
+  // malformed input fails closed and never throws
+  const { revoked: _r, ...noRevoked } = approval();
+  for (const a of [{}, noRevoked, approval({ revoked: 0 })])
+    assert.equal(verifyApprovalBinding(base, a as never, GIT, model, NOW), false);
+  assert.equal(verifyApprovalBinding(base, approval() as never, { ...GIT, args: ["push"] }, model, NOW), false);
+  assert.equal(verifyApprovalBinding(base, approval() as never, { ...GIT, cwd: "C:\\repo\\..\\repo" }, model, NOW), false);
 });
-
 test("ceiling and policy are immutable", () => {
   assert.throws(() => (DENIED_EXECUTABLES as string[]).push("x"));
   assert.throws(() => (SUPPORTED_ENFORCEMENT as string[]).push("isolation.sandbox"));
@@ -192,19 +222,19 @@ test("spawn deny rules match broadly", () => {
     ["no cwd", { executable: GIT.executable, args: ["status"] }, GIT, "denied_by_rule"],
     ["no cwd, empty args", { executable: GIT.executable, args: [] }, GIT, "denied_by_rule"],
     ["matching cwd", { ...GIT, cwd: "C:\\REPO" }, GIT, "denied_by_rule"],
-    ["different cwd", { ...GIT, cwd: "C:\\other" }, GIT, "ALLOW"],
+    ["different cwd", { ...GIT, cwd: "C:\\other" }, GIT, "approval_required"],
     ["deny cwd covers subdir", { ...GIT, cwd: "C:\\repo" }, { ...GIT, cwd: "C:\\repo\\sub" }, "denied_by_rule"],
     ["deny drive root", { ...GIT, args: [], cwd: "C:\\" }, GIT, "denied_by_rule"],
-    ["deny cwd not sibling", { ...GIT, cwd: "C:\\repo" }, { ...GIT, cwd: "C:\\repo2" }, "approval_invalid"], // not denied (fixture approval targets C:\\repo)
+    ["deny cwd not sibling", { ...GIT, cwd: "C:\\repo" }, { ...GIT, cwd: "C:\\repo2" }, "approval_required"], // not denied
     ["args [] denies all", { ...GIT, args: [] }, GIT, "denied_by_rule"],
     ["prefix push", { ...GIT, args: ["push"] }, { ...GIT, args: ["push", "--force"] }, "denied_by_rule"],
-    ["prefix push vs status", { ...GIT, args: ["push"] }, GIT, "ALLOW"],
+    ["prefix push vs status", { ...GIT, args: ["push"] }, GIT, "approval_required"],
   ];
   for (const [n, denyCmd, req, want] of cases) {
     const a = rule("a", "allow", "process.spawn", { command: req });
     const d = rule("d", "deny", "process.spawn", { command: denyCmd });
     for (const order of [[a, d], [d, a]])
-      assert.equal(reason(load(order), spawn(req, { approval: approval({}, req) })), want, n);
+      assert.equal(reason(load(order), spawn(req)), want, n);
   }
   const bad = rule("d", "deny", "process.spawn", { command: { executable: GIT.executable, args: [], cwd: "C:\\a\\..\\b" } });
   assert.ok(rejected(cfg([bad])).issues.some((i) => i.code === "invalid_path"));
@@ -216,8 +246,8 @@ test("spawn deny rules match broadly", () => {
   // forged policies (bypass loadPolicy): malformed deny always matches, malformed allow never does
   const forge = (...rules: unknown[]) => ({ schemaVersion: 1, policyId: "p1", rules }) as unknown as PolicyConfig;
   const goodAllow = rule("a", "allow", "process.spawn", { command: GIT });
-  const run = (p: PolicyConfig) => reason(p, spawn(GIT, { approval: approval() }));
-  assert.equal(run(forge(goodAllow)), "ALLOW");
+  const run = (p: PolicyConfig) => reason(p, spawn(GIT));
+  assert.equal(run(forge(goodAllow)), "approval_required");
   for (const c of [{ ...GIT, executable: "C:\\tools\\..\\git.exe" }, { ...GIT, cwd: "C:\\repo\\..\\repo" }])
     assert.equal(run(forge(goodAllow, rule("d", "deny", "process.spawn", { command: c }))), "denied_by_rule");
   assert.equal(reason(forge(rule("a", "allow", "fs.read", { root: "C:\\repo\\..\\repo" })), read("C:\\repo\\a")), "no_matching_rule");
@@ -229,7 +259,7 @@ test("spawn deny rules match broadly", () => {
   assert.equal(reason(forge(rule("d", "deny", "fs.read", { command: GIT })), read("C:\\repo\\a")), "denied_by_rule");
   // fs.write deny vs allow, and drive-root scope
   const w = load([rule("w", "allow", "fs.write", { root: "C:\\repo" }), rule("wd", "deny", "fs.write", { root: "C:\\repo\\sub" })]);
-  assert.equal(reason(w, { principal: model, operation: "fs.write", target: { path: "C:\\repo\\sub\\f" } }), "denied_by_rule");
+  assert.equal(reason(w, { operation: "fs.write", target: { path: "C:\\repo\\sub\\f" } }), "denied_by_rule");
   const root = load([rule("r", "allow", "fs.read", { root: "C:\\" })]);
   assert.equal(reason(root, read("C:\\x")), "ALLOW");
   assert.equal(reason(root, read("D:\\x")), "no_matching_rule");
@@ -249,9 +279,8 @@ test("fails closed", () => {
   for (const g of garbage) assert.equal(reason(base, g), "invalid_request", JSON.stringify(g));
   const cyc: Record<string, unknown> = {};
   cyc["self"] = cyc;
-  assert.doesNotThrow(() => decide(base, cyc, NOW));
+  assert.doesNotThrow(() => decide(base, cyc, { principal: model }));
   assert.equal(reason(null as unknown as PolicyConfig, read("C:\\repo\\a")), "internal_error");
-  assert.deepEqual(decide(base, spawn(GIT, { approval: approval() }), new Date(NaN)), { allow: false, reason: "approval_invalid" });
 });
 
 test("operationDigest is stable and cwd-sensitive", () => {

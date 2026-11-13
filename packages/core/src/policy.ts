@@ -6,7 +6,7 @@ import type { ParseResult } from "./contracts.ts";
 // Pure, deterministic, platform-independent policy kernel: string ops only, no fs, no `path`.
 // Models and System 1 advice never grant anything; only code-defined ceiling + validated rules do.
 
-export const OPERATIONS = ["fs.read", "fs.write", "process.spawn"] as const;
+export const OPERATIONS = deepFreeze(["fs.read", "fs.write", "process.spawn"] as const);
 export type Operation = (typeof OPERATIONS)[number];
 export type Risk = "low" | "medium" | "high";
 
@@ -25,8 +25,6 @@ function deepFreeze<T>(o: T): T {
 
 const RESERVED = /^(con|prn|aux|nul|com[0-9]|lpt[0-9]|conin\$|conout\$|clock\$)$/;
 
-// ponytail: lexical only. Symlink/junction/8.3 resolution needs fs.realpathSync.native in the I/O
-// executor layer (not this milestone); the kernel never touches the filesystem.
 /** Returns a lowercase comparison key, or null if the path is rejected. */
 export function checkPath(p: unknown): string | null {
   if (typeof p !== "string" || p.length === 0 || p.length > 259) return null;
@@ -110,11 +108,7 @@ export function loadPolicy(input: unknown): ParseResult<PolicyConfig> {
     if ("command" in rule.target && rule.target.command.cwd === undefined)
       issues.push({ path: `${at}.target.command.cwd`, code: "missing_cwd", message: "allowed spawn rules must pin cwd" });
   });
-  // ponytail: write-then-exec escalation (AC4). The approval digest binds path+args, not file contents; content
-  // hashing of the executable belongs to the executor (cwd-based DLL search is not covered here).
-  // ponytail: a spawn cwd inside a writable root lets a model plant a fake bare repo (HEAD/objects/refs/config with
-  // core.fsmonitor) that git would discover and execute. The executor must run git with safe.bareRepository=explicit
-  // (or GIT_CEILING_DIRECTORIES). Not enforced by this lexical kernel.
+  // Write-then-exec escalation (AC4); see the executor requirements in decide().
   const allows = r.value.rules.filter((x) => x.effect === "allow");
   const writeRoots = allows.flatMap((x) => (x.operation === "fs.write" && "root" in x.target ? [checkPath(x.target.root)] : [])).filter((k): k is string => k !== null);
   for (const [i, x] of r.value.rules.entries()) {
@@ -132,17 +126,15 @@ export function loadPolicy(input: unknown): ParseResult<PolicyConfig> {
 // ---- Request + decision ----
 
 const Request = z.strictObject({
-  principal: Principal,
   operation: z.string(),
   target: z.union([z.strictObject({ path: z.string() }), z.strictObject({ command: CommandSpec })]),
   requires: z.array(z.string()).optional(),
   advice: SystemOneDecision.optional(),
-  approval: OperationApproval.optional(),
 });
 
 export type DenyReason =
   | "invalid_request" | "unknown_operation" | "invalid_target" | "ceiling_violation" | "unsupported_enforcement"
-  | "uncalibrated_high_risk_advice" | "no_matching_rule" | "denied_by_rule" | "approval_required" | "approval_invalid" | "internal_error";
+  | "uncalibrated_high_risk_advice" | "no_matching_rule" | "denied_by_rule" | "approval_required" | "invalid_context" | "internal_error";
 export type Decision = { allow: true; ruleId: string; risk: Risk } | { allow: false; reason: DenyReason };
 
 const deny = (reason: DenyReason): Decision => ({ allow: false, reason });
@@ -154,7 +146,13 @@ export function operationDigest(cmd: CommandSpec): Digest {
 
 const samePrincipal = (a: { kind: string; id: string }, b: { kind: string; id: string }) => a.kind === b.kind && a.id === b.id;
 
-function approvalValid(policy: PolicyConfig, p: Principal, cmd: CommandSpec, a: OperationApproval, now: Date): boolean {
+/**
+ * Binding check ONLY, NOT authorisation: verifies a grant's digest, policy, requester, target and time window.
+ * It cannot tell a real grant from a forged one; an approval broker must establish provenance first.
+ * `decide` never consults it.
+ */
+export function verifyApprovalBinding(policy: PolicyConfig, a: OperationApproval, cmd: CommandSpec, p: Principal, now: Date): boolean {
+  if (!OperationApproval.safeParse(a).success) return false; // untrusted shape: never throw, fail closed
   const d = operationDigest(cmd);
   const cwd = checkPath(cmd.cwd);
   const t = now.getTime();
@@ -169,12 +167,31 @@ function approvalValid(policy: PolicyConfig, p: Principal, cmd: CommandSpec, a: 
   );
 }
 
-// ponytail: grants are replayable until expiry; single-use consumption of `grantId` belongs to the M1-07
-// approval broker. This verifies only the grant's binding. Approver authentication and the revocation store
-// (the `revoked` flag here is just what the caller supplied) come from the M1-07 approval broker.
-/** Never throws; any failure is a deny. */
-export function decide(policy: PolicyConfig, request: unknown, now: Date): Decision {
+/**
+ * Supplied and authenticated by the trusted host (orchestrator/executor boundary), never copied from agent or
+ * model output. The request is untrusted agent data and carries neither principal nor approval.
+ */
+export type HostContext = { principal: Principal };
+
+/**
+ * Decides one untrusted request. `policy` must be the output of `loadPolicy`. Never throws; any failure is a deny.
+ *
+ * Executor requirements (not enforced by this lexical, pure kernel):
+ * - Lexical only. Symlink/junction/8.3 resolution needs fs.realpathSync.native in the I/O
+ *   executor layer (not this milestone); the kernel never touches the filesystem.
+ * - Write-then-exec escalation (AC4). The approval digest binds path+args, not file contents; content
+ *   hashing of the executable belongs to the executor (cwd-based DLL search is not covered here).
+ * - A spawn cwd inside a writable root lets a model plant a fake bare repo (HEAD/objects/refs/config with
+ *   core.fsmonitor) that git would discover and execute. The executor must run git with safe.bareRepository=explicit
+ *   (or GIT_CEILING_DIRECTORIES). Not enforced by this lexical kernel.
+ * - fs scope is a subtree match; a rule/deny on a subtree does not cover its ancestors, so the
+ *   executor must do non-recursive single-path operations (e.g. fs.write on C:epo, the parent of .git).
+ */
+export function decide(policy: PolicyConfig, request: unknown, context: HostContext): Decision {
   try {
+    const ctx = z.strictObject({ principal: Principal }).safeParse(context);
+    if (!ctx.success) return deny("invalid_context");
+    const principal = ctx.data.principal;
     const parsed = Request.safeParse(request);
     if (!parsed.success) return deny("invalid_request");
     const req = parsed.data;
@@ -197,13 +214,11 @@ export function decide(policy: PolicyConfig, request: unknown, now: Date): Decis
     const advice = req.advice;
     if (advice && advice.risk === "high" && !advice.calibrated) return deny("uncalibrated_high_risk_advice");
 
-    // ponytail: fs scope is a subtree match; a rule/deny on a subtree does not cover its ancestors, so the
-    // executor must do non-recursive single-path operations (e.g. fs.write on C:\repo, the parent of .git).
     // Allow rules match exactly; deny rules match broadly and fail closed: a deny rule with an invalid path
     // matches, spawn cwd is optional and a subtree match, and args are a POSITIONAL prefix (a deny on ["push"]
     // does not cover ["-C", ".", "push"]; acceptable because allows are exact).
     const matches = policy.rules.filter((rule) => {
-      if (rule.operation !== operation || !rule.principals.some((q) => samePrincipal(q, req.principal))) return false;
+      if (rule.operation !== operation || !rule.principals.some((q) => samePrincipal(q, principal))) return false;
       const isDeny = rule.effect !== "allow";
       if ("root" in rule.target) {
         const root = checkPath(rule.target.root);
@@ -226,11 +241,9 @@ export function decide(policy: PolicyConfig, request: unknown, now: Date): Decis
     // Advice may only raise risk, never lower it.
     let risk = BASE_RISK[operation];
     if (advice && RISK_RANK[advice.risk] > RISK_RANK[risk]) risk = advice.risk;
-    if (risk === "high") {
-      if (!req.approval) return deny("approval_required");
-      // A high-risk fs op can never be approved: fails closed.
-      if (!isSpawn || !approvalValid(policy, req.principal, cmd!, req.approval, now)) return deny("approval_invalid");
-    }
+    // ponytail: high-risk operations (including all process.spawn) cannot be authorised until the M1-07 approval
+    // broker provides trusted grant provenance (approver authentication, issuance, revocation store, single-use).
+    if (risk === "high") return deny("approval_required");
     return { allow: true, ruleId: rule.ruleId, risk };
   } catch {
     return deny("internal_error");
