@@ -357,7 +357,7 @@ export async function runDoctor(
   caps.push({
     id: "jev.connectivity",
     status: "blocked",
-    detail: "No Jev endpoint/contract defined yet; connectivity probe deferred to M0-06 (#11). No network request made.",
+    detail: "System One adapter boundary exists (M0-06, #11) but live Jev transport is unauthorised and unverified. No network request made.",
   });
 
   return { schemaVersion: 1, platform: ctx.platform, arch: os.arch(), capabilities: caps };

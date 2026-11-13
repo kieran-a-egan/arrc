@@ -131,17 +131,50 @@ export type TaskDag = z.infer<typeof TaskDag>;
 
 // ---- 2. SystemOneDecision (advisory only: no approval/permission fields; strictness rejects them) ----
 
+// Short bounded identifier (not free text) for System One categories.
+export const SystemOneCategory = z.string().regex(/^[a-z][a-z0-9.]{0,63}$/);
+// Closed set of request metadata field names a decision may cite as evidence.
+const EVIDENCE = z.enum(["operation", "fileCount", "totalLines", "extensions", "sensitivePaths", "otherExtensions"]);
+
 // ponytail: fail-closed handling of high-risk uncalibrated advice is policy work (M0-05), not schema.
 export const SystemOneDecision = z.strictObject({
   schemaVersion,
   decisionId: id,
   taskId: id,
-  recommendation: z.string(),
+  category: SystemOneCategory,
+  recommendation: label.max(200),
   confidence: z.number().min(0).max(1),
   calibrated: z.boolean(),
   risk: z.enum(["low", "medium", "high"]),
+  // evidence = names of the request metadata fields relied on; requestDigest binds to the exact payload sent.
+  provenance: z.strictObject({
+    provider: label,
+    model: label,
+    modelVersion: label,
+    requestDigest: Digest,
+    evidence: z.array(EVIDENCE).min(1).max(32),
+  }),
 });
 export type SystemOneDecision = z.infer<typeof SystemOneDecision>;
+
+// Metadata-only request to System One: no path or content fields by construction.
+// requestId/taskId are id-shaped but MUST be opaque host-generated ids, never model-authored text.
+// ponytail: operation literals are inlined (policy.ts imports this file; importing OPERATIONS would be circular).
+export const SystemOneRequest = z.strictObject({
+  schemaVersion,
+  requestId: id,
+  taskId: id,
+  category: SystemOneCategory,
+  metadata: z.strictObject({
+    operation: z.enum(["fs.read", "fs.write", "process.spawn"]),
+    fileCount: z.int().min(0),
+    totalLines: z.int().min(0),
+    extensions: z.array(z.string().regex(/^\.[a-z0-9]{1,10}$/)).max(32),
+    otherExtensions: z.int().min(0), // distinct extensions dropped (non-matching or beyond the cap)
+    sensitivePaths: z.boolean(),
+  }),
+});
+export type SystemOneRequest = z.infer<typeof SystemOneRequest>;
 
 // ---- 3. ExecutorCapability ----
 

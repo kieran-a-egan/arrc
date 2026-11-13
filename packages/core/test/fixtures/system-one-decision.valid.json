@@ -1,1 +1,1 @@
-{"schemaVersion":1,"decisionId":"x1","taskId":"a","recommendation":"proceed","confidence":0.8,"calibrated":true,"risk":"low"}
+{"schemaVersion":1,"decisionId":"x1","taskId":"a","category":"review","recommendation":"proceed","confidence":0.8,"calibrated":true,"risk":"low","provenance":{"provider":"fake","model":"m","modelVersion":"1","requestDigest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","evidence":["operation"]}}

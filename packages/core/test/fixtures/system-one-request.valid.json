@@ -1,0 +1,1 @@
+{"schemaVersion":1,"requestId":"r1","taskId":"a","category":"review","metadata":{"operation":"fs.read","fileCount":2,"totalLines":10,"extensions":[".ts"],"otherExtensions":0,"sensitivePaths":false}}

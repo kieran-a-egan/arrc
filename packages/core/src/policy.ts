@@ -10,10 +10,10 @@ export const OPERATIONS = deepFreeze(["fs.read", "fs.write", "process.spawn"] as
 export type Operation = (typeof OPERATIONS)[number];
 export type Risk = "low" | "medium" | "high";
 
-const RISK_RANK: Record<Risk, number> = { low: 0, medium: 1, high: 2 };
+export const RISK_RANK: Record<Risk, number> = deepFreeze({ low: 0, medium: 1, high: 2 });
 const BASE_RISK: Record<Operation, Risk> = { "fs.read": "low", "fs.write": "medium", "process.spawn": "high" };
 
-function deepFreeze<T>(o: T): T {
+export function deepFreeze<T>(o: T): T {
   if (typeof o === "object" && o !== null && !Object.isFrozen(o)) {
     Object.freeze(o);
     for (const v of Object.values(o)) deepFreeze(v);
