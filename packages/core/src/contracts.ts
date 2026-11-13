@@ -42,6 +42,7 @@ export function parseContract<S extends z.ZodType>(schema: S, input: unknown): P
 
 // One shared id schema for every identifier (also record keys): excludes "", "__proto__", leading punctuation.
 const id = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/);
+export { id as Id };
 const noNul = (s: string) => !s.includes("\0");
 const safeString = z.string().refine(noNul, "must not contain NUL");
 const label = safeString.min(1).refine((s) => s.trim().length > 0, "must not be blank");
