@@ -11,7 +11,8 @@
     "build": "npm run build --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
-    "doctor": "node packages/core/src/doctor.ts"
+    "doctor": "node packages/core/src/doctor.ts",
+    "claude-probe": "node packages/core/src/claude-probe.ts"
   },
   "devDependencies": {
     "@types/node": "24.19.2",
