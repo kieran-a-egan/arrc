@@ -42,6 +42,7 @@ export function parseContract<S extends z.ZodType>(schema: S, input: unknown): P
 
 // One shared id schema for every identifier (also record keys): excludes "", "__proto__", leading punctuation.
 const id = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/);
+export { id as Id };
 const noNul = (s: string) => !s.includes("\0");
 const safeString = z.string().refine(noNul, "must not contain NUL");
 const label = safeString.min(1).refine((s) => s.trim().length > 0, "must not be blank");
@@ -156,9 +157,9 @@ export type ExecutorCapability = z.infer<typeof ExecutorCapability>;
 
 // ---- 4. OperationApproval ----
 
-// ponytail: a parsed grant is NOT proof of authority. Approver authentication, revocation lookup and
-// verifying operationDigest against `operation` are enforcement concerns for the policy milestone (M0-05);
-// consumers must not treat schema validity as authorisation.
+// ponytail: a parsed grant is NOT proof of authority. M0-05 provides binding/digest verification only
+// (`verifyApprovalBinding`); approver authentication, revocation lookup and grant provenance belong to the
+// M1-07 approval broker. Consumers must not treat schema validity as authorisation.
 
 export const OperationApproval = z
   .strictObject({
