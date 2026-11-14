@@ -48,7 +48,7 @@ const safeString = z.string().refine(noNul, "must not contain NUL");
 const label = safeString.min(1).refine((s) => s.trim().length > 0, "must not be blank");
 const timestamp =z.iso.datetime();
 
-// ponytail: executable + argv only. .exe/.cmd/.ps1 launcher handling belongs to the executor milestone.
+// ponytail: executable + argv only. .exe/.cmd/.ps1 launcher handling lives in launch.ts (planLaunch).
 export const CommandSpec = z.strictObject({
   executable: safeString.min(1),
   args: z.array(safeString),

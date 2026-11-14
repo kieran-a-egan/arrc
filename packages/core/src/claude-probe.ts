@@ -1,10 +1,11 @@
-import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { CLOUD_ENV, scanHookTrust } from "./claude-trust.ts";
 import { locateClaudeExe, runVersion, type Ctx, type Status } from "./doctor.ts";
+import { CLOSE_GRACE_MS, killTree } from "./launch.ts";
 
 // Never let the probe self-update or phone home.
 const NO_UPDATE = { DISABLE_AUTOUPDATER: "1", DISABLE_UPDATES: "1", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1" };
@@ -174,20 +175,6 @@ export interface RunResult {
   stderrTail: string;
 }
 
-// Node's child.kill() is a forceful TerminateProcess on Windows and spares descendants that are
-// not in the parent's job object, so kill the whole tree with taskkill /T, falling back to child.kill().
-// Graceful interrupt is not available from a Node parent.
-// ponytail: POSIX only SIGTERMs the direct child; process-group tree kill is unverified/unsupported in this spike.
-function killTree(child: ChildProcess): void {
-  if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return;
-  if (process.platform === "win32") {
-    const tk = path.win32.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe");
-    execFile(tk, ["/pid", String(child.pid), "/T", "/F"], { shell: false, windowsHide: true }, (err) => {
-      if (err) child.kill();
-    });
-  } else child.kill("SIGTERM");
-}
-
 export function runClaude(o: {
   exe: string;
   prefixArgs?: string[];
@@ -242,17 +229,23 @@ export function runClaude(o: {
     };
     // Kill, then give `close` 2s before giving up on the pipes and resolving anyway.
     // ponytail: a stuck process may outlive the resolve if taskkill and kill() both fail.
-    const kill = () => {
-      killTree(child);
+    const bound = () =>
       timers.push(
         setTimeout(() => {
           child.stdout?.destroy();
           child.stderr?.destroy();
+          if (!settled) {
+            onLine(buf); // flush a final unterminated line
+            buf = "";
+          }
           r.exitCode ??= child.exitCode;
           r.signal ??= child.signalCode;
           settle();
-        }, 2000).unref(),
+        }, CLOSE_GRACE_MS).unref(),
       );
+    const kill = () => {
+      killTree(child);
+      bound();
     };
     const onLine = (line: string) => {
       if (!line.trim()) return;
@@ -290,6 +283,7 @@ export function runClaude(o: {
     child.stderr?.setEncoding("utf8").on("data", (d: string) => (r.stderrTail = (r.stderrTail + d).slice(-4096)));
     timers.push(
       setTimeout(() => {
+        if (child.exitCode !== null || child.signalCode !== null) return; // already exited by itself
         r.timedOut = true;
         kill();
       }, o.timeoutMs),
@@ -304,6 +298,7 @@ export function runClaude(o: {
       r.spawnError = String(e.code ?? e.name);
       settle();
     });
+    child.on("exit", bound); // same bound after a normal exit: an orphaned grandchild may hold the pipes open
     child.on("close", (code, sig) => {
       if (settled) return;
       onLine(buf);

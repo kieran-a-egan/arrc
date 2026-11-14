@@ -30,3 +30,7 @@ jobs:
       - run: npm run build
       - run: npm run typecheck
       - run: npm test
+      - name: npm test under Windows PowerShell 5.1
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: npm test
