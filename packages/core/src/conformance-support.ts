@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { requestDigest } from "./index.ts";
+import { CLOSE_GRACE_MS } from "./launch.ts";
 import type { SystemOneProvider } from "./index.ts";
 
 export type After = { after: (f: () => void) => void };
@@ -80,10 +81,13 @@ export function executorConformance(name: string, exec: Exec, skip?: string) {
     let pid: number | undefined;
     try {
       const t0 = Date.now();
-      const r = await exec({ exe, script: echoScript, arg: "x", env: { ARRC_ORPHAN: "1" }, timeoutMs: 20_000 });
+      // timeout == close-grace: any value in (exit time, exit time + grace) checks the fix; this gives the most startup headroom
+      const r = await exec({ exe, script: echoScript, arg: "x", env: { ARRC_ORPHAN: "1" }, timeoutMs: CLOSE_GRACE_MS });
       pid = r.orphanPid;
       assert.ok(Date.now() - t0 < 6000, `took ${Date.now() - t0}ms`);
       assert.equal(r.error, undefined);
+      assert.equal(r.timedOut, false);
+      assert.ok(r.args?.includes("x"), `unterminated final line not flushed: ${JSON.stringify(r.args)}`); // pins the flush
       assert.ok(pid, "fixture reported no grandchild pid");
     } finally {
       if (pid) {

@@ -10,6 +10,13 @@ else {
     g.unref();
   }
   if (process.env.ARRC_BIG) process.stdout.write("x".repeat(Number(process.env.ARRC_BIG)));
-  process.stdout.write(JSON.stringify({ type: "result", args: process.argv.slice(2) }) + "\n");
+  // surrogate mode: a pair straddling the 2**20 cap, then a later chunk that must be ignored
+  if (process.env.ARRC_SURR) {
+    process.stdout.write("x".repeat(2 ** 20 - 1) + "\u{1F600}");
+    await new Promise((r) => setTimeout(r, 300));
+    process.stdout.write("abc");
+  }
+  // orphan mode: final line has no trailing newline, to pin the unterminated-final-line flush
+  process.stdout.write(JSON.stringify({ type: "result", args: process.argv.slice(2) }) + (process.env.ARRC_ORPHAN ? "" : "\n"));
   process.exitCode = Number(process.env.ARRC_EXIT ?? 0); // natural exit so a large piped write is flushed
 }

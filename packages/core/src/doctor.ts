@@ -45,6 +45,19 @@ function envGet(ctx: Ctx, key: string): string | undefined {
   return k === undefined ? undefined : ctx.env[k];
 }
 
+export const isDriveAbsolute = (p: string) => /^[A-Za-z]:[\\/]/.test(p) && p.indexOf(":", 2) === -1;
+
+/** %SystemRoot% only if drive-absolute: "", ".", "C:relative" etc. would make interpreter paths cwd-relative. */
+export function systemRoot(raw: string | undefined = process.env.SystemRoot): string | undefined {
+  return raw !== undefined && isDriveAbsolute(raw) ? raw : undefined;
+}
+
+/** Absolute System32 path; an invalid SystemRoot falls back to the fixed literal, never a relative or bare name. */
+export function system32From(raw: string | undefined, ...parts: string[]): string {
+  return path.win32.join(systemRoot(raw) ?? "C:\\Windows", "System32", ...parts);
+}
+export const system32 = (...parts: string[]): string => system32From(process.env.SystemRoot, ...parts);
+
 function isFile(p: string): boolean {
   try {
     return fs.statSync(p).isFile();
@@ -226,8 +239,7 @@ export async function runDoctor(
   ctx: Ctx = { env: process.env, platform: process.platform },
 ): Promise<DoctorReport> {
   const win = ctx.platform === "win32";
-  const sysRoot = envGet(ctx, "SystemRoot");
-  const sys32 = (...p: string[]): string | undefined => (sysRoot ? path.win32.join(sysRoot, "System32", ...p) : undefined);
+  const sys32 = (...p: string[]): string => system32From(envGet(ctx, "SystemRoot"), ...p);
   const dev = readDevEngines();
   const caps: Capability[] = [];
 

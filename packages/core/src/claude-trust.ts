@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { system32 } from "./doctor.ts";
 
 // Pre-flight scan: can the PreToolUse gate hook be trusted to register and run? Presence/shape only: no setting
 // value is ever returned or logged, reasons carry only a source label and a key name. Key and path names were
@@ -30,7 +31,7 @@ export function insideGitRepo(dir: string): boolean {
 
 /** Presence-only registry policy probe (win32): never reads values. Not-found is the only clean answer; anything else is untrusted. */
 function regKeyState(key: string): "absent" | "present" | "error" {
-  const reg = path.win32.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "reg.exe");
+  const reg = system32("reg.exe");
   const r = spawnSync(reg, ["query", key], { shell: false, windowsHide: true, encoding: "utf8" });
   if (r.error || r.status === null) return "error";
   if (r.status === 0) return "present";

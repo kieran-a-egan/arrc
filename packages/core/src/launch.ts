@@ -1,6 +1,6 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import path from "node:path";
-import { resolveCommand } from "./doctor.ts";
+import { isDriveAbsolute, resolveCommand, system32, systemRoot } from "./doctor.ts";
 
 export type Shell = "pwsh" | "powershell";
 export type LaunchPlan = { ok: true; command: string; args: string[] } | { ok: false; reason: string };
@@ -12,17 +12,21 @@ export const CLOSE_GRACE_MS = 2000;
 // not in the parent's job object, so kill the whole tree with taskkill /T, falling back to child.kill().
 // Graceful interrupt is not available from a Node parent.
 // ponytail: POSIX only SIGTERMs the direct child; process-group tree kill is unverified/unsupported in this spike.
+/** Absolute taskkill path (SystemRoot validation lives in doctor.ts). */
+export const taskkillPath = (): string => system32("taskkill.exe");
+
 export function killTree(child: ChildProcess): void {
   if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return;
   if (process.platform === "win32") {
-    const tk = path.win32.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe");
-    execFile(tk, ["/pid", String(child.pid), "/T", "/F"], { shell: false, windowsHide: true }, (err) => {
+    execFile(taskkillPath(), ["/pid", String(child.pid), "/T", "/F"], { shell: false, windowsHide: true }, (err) => {
       if (err) child.kill();
     });
   } else child.kill("SIGTERM");
 }
 
 /**
+ * RAW native launcher plan: performs NO policy check. Callers must obtain an allow from `decide()` first.
+ * Windows-only: any other platform is `unsupported_platform`.
  * Pure: decides how a file may be launched. Always shell:false; a shell is only ever an explicit, named
  * interpreter for a .ps1, never inferred. .cmd/.bat are unsupported (CVE-2024-27980: need a shell, and cmd
  * metacharacters cannot be safely escaped). No -ExecutionPolicy override: a restrictive machine policy fails visibly.
@@ -31,17 +35,21 @@ export function killTree(child: ChildProcess): void {
  */
 export function planLaunch(o: { file: string; args?: string[]; shell?: Shell }): LaunchPlan {
   const args = o.args ?? [];
-  if (!/^[A-Za-z]:[\\/]/.test(o.file) || o.file.indexOf(":", 2) !== -1) return { ok: false, reason: "path_not_absolute" };
+  if (process.platform !== "win32") return { ok: false, reason: "unsupported_platform" };
+  if (!isDriveAbsolute(o.file)) return { ok: false, reason: "path_not_absolute" };
   const ext = path.win32.extname(o.file).toLowerCase();
   if (ext === ".exe") return { ok: true, command: o.file, args };
   if (ext === ".cmd" || ext === ".bat") return { ok: false, reason: "blocked_cmd_shim" };
   if (ext === ".ps1") {
     if (!o.shell) return { ok: false, reason: "shell_required_for_ps1" };
     let command: string | undefined;
-    if (o.shell === "powershell") command = path.win32.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
-    else if (o.shell === "pwsh") {
+    if (o.shell === "powershell") {
+      const root = systemRoot();
+      if (!root) return { ok: false, reason: "shell_not_found" };
+      command = path.win32.join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+    } else if (o.shell === "pwsh") {
       command = resolveCommand("pwsh", { platform: process.platform, env: process.env }, ".exe");
-      if (!command) return { ok: false, reason: "shell_not_found" };
+      if (!command || !isDriveAbsolute(command)) return { ok: false, reason: "shell_not_found" };
     } else return { ok: false, reason: "unknown_shell" };
     return { ok: true, command, args: ["-NoProfile", "-NonInteractive", "-File", o.file, ...args] };
   }
@@ -58,9 +66,13 @@ export interface LaunchResult {
   cancelled: boolean;
 }
 
-const MAX_STREAM = 1 << 20; // 1 MiB per stream (UTF-16 code units)
+const MAX_STREAM = 1 << 20; // 1,048,576 UTF-16 code units per stream (not bytes)
 
-/** Plans via planLaunch (never accepts a pre-built plan), then runs. Never rejects. */
+/**
+ * RAW native launcher: performs NO policy check; callers must obtain an allow from `decide()` first.
+ * Plans via planLaunch (never accepts a pre-built plan), then runs. Never rejects.
+ * Each of stdout/stderr is capped at 1,048,576 UTF-16 code units (not bytes); a trailing lone high surrogate is dropped.
+ */
 export function runLaunch(spec: { file: string; args?: string[]; shell?: Shell }, o: { timeoutMs: number; env?: Record<string, string>; signal?: AbortSignal }): Promise<LaunchResult> {
   const r: LaunchResult = { exitCode: null, stdout: "", stderr: "", timedOut: false, cancelled: false };
   const plan = planLaunch(spec);
@@ -109,10 +121,17 @@ export function runLaunch(spec: { file: string; args?: string[]; shell?: Shell }
       kill();
     };
     o.signal?.addEventListener("abort", abort, { once: true });
+    const full = { stdout: false, stderr: false };
     const cap = (k: "stdout" | "stderr") => (d: string) => {
-      const keep = d.slice(0, Math.max(0, MAX_STREAM - r[k].length));
+      if (full[k]) return; // once truncated, ignore the rest so the kept text stays a true prefix
+      let keep = d.slice(0, Math.max(0, MAX_STREAM - r[k].length));
+      if (keep.length < d.length) {
+        r.truncated = true;
+        full[k] = true;
+        const last = keep.charCodeAt(keep.length - 1);
+        if (last >= 0xd800 && last <= 0xdbff) keep = keep.slice(0, -1); // don't split a surrogate pair
+      }
       r[k] += keep;
-      if (keep.length < d.length) r.truncated = true;
     };
     child.stdout?.setEncoding("utf8").on("data", cap("stdout"));
     child.stderr?.setEncoding("utf8").on("data", cap("stderr"));

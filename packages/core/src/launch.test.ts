@@ -1,10 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import path from "node:path";
 import { runClaude } from "./claude-probe.ts";
 import { resolveCommand } from "./doctor.ts";
 import { parseContract, CommandSpec, SystemOneRequest, adviseSystemOne, buildRequest, decide, loadPolicy, loadSystemOneGate, checkPath } from "./index.ts";
-import { planLaunch, runLaunch } from "./launch.ts";
+import { planLaunch, runLaunch, taskkillPath } from "./launch.ts";
+import { system32, system32From } from "./doctor.ts";
 import { echoScript, executorConformance, fakeProviders, fixtureDir, win, type Exec } from "./conformance-support.ts";
 
 const NOT_WIN = "Windows-only: .ps1/.cmd launch semantics";
@@ -12,7 +14,7 @@ const NATIVE_WIN_ONLY = "Windows-only: the native launcher accepts only drive-ab
 const lastJson = (s: string) => JSON.parse(s.trim().split("\n").pop()!);
 
 // ---- planLaunch matrix ----
-test("planLaunch: .exe direct, .ps1 only with an explicit shell, .cmd/.bat/other/relative blocked", () => {
+test("planLaunch: .exe direct, .ps1 only with an explicit shell, .cmd/.bat/other/relative blocked", { skip: !win && NATIVE_WIN_ONLY }, () => {
   const ctx = { platform: process.platform, env: process.env };
   const A = "C:\\t\\a b\u00fc";
   assert.deepEqual(planLaunch({ file: `${A}\\x.exe`, args: ["1"] }), { ok: true, command: `${A}\\x.exe`, args: ["1"] });
@@ -101,8 +103,63 @@ test("runLaunch plans internally: missing exe is ENOENT, bad spec is a structure
   assert.equal((await runLaunch({ file: cmd }, { timeoutMs: 5000 })).error, "blocked_cmd_shim");
 });
 
-test("planLaunch off Windows: the native launcher is unsupported (POSIX absolute path rejected)", { skip: win && "non-Windows only" }, () => {
-  assert.deepEqual(planLaunch({ file: "/usr/bin/node" }), { ok: false, reason: "path_not_absolute" });
+test("planLaunch/runLaunch off Windows: unsupported_platform, nothing spawned", { skip: win && "non-Windows only" }, async () => {
+  const unsupported = { ok: false, reason: "unsupported_platform" };
+  assert.deepEqual(planLaunch({ file: "C:\\x\\foo.exe" }), unsupported);
+  assert.deepEqual(planLaunch({ file: "/usr/bin/node" }), unsupported);
+  const r = await runLaunch({ file: "C:\\x\\foo.exe" }, { timeoutMs: 5000 });
+  assert.equal(r.error, "unsupported_platform");
+  assert.equal(r.exitCode, null);
+});
+
+test("SystemRoot that is not drive-absolute never yields a cwd-relative interpreter or taskkill path", async () => {
+  const prev = process.env.SystemRoot;
+  try {
+    for (const bad of ["", ".", "C:relative", "relative\\dir", "\\\\srv\\share", "\\\\?\\C:\\Windows", "\\Windows", " C:\\Windows", "C:\\a:b"]) {
+      process.env.SystemRoot = bad;
+      const driveAbs = (p: string) => path.win32.isAbsolute(p) && /^[A-Za-z]:[\\/]/.test(p);
+      // taskkill, claude-trust reg.exe (system32) and doctor's sys32 (system32From with the ctx value) share these helpers
+      for (const p of [taskkillPath(), system32("reg.exe"), system32From(bad, "WindowsPowerShell", "v1.0", "powershell.exe")])
+        assert.ok(driveAbs(p), `SystemRoot=${JSON.stringify(bad)}: ${p}`);
+      if (!win) continue; // planLaunch is Windows-only (unsupported_platform elsewhere)
+      const p = planLaunch({ file: "C:\\x\\a.ps1", shell: "powershell" });
+      assert.deepEqual(p, { ok: false, reason: "shell_not_found" }, `SystemRoot=${JSON.stringify(bad)}`);
+    }
+  } finally {
+    if (prev === undefined) delete process.env.SystemRoot;
+    else process.env.SystemRoot = prev;
+  }
+});
+
+// Source assertion instead of a seam: regKeyState and runDoctor's sys32 are not injectable without invasive wiring.
+test("claude-trust.ts and doctor.ts build System32 paths only via the validated helpers", () => {
+  for (const f of ["claude-trust.ts", "launch.ts"]) {
+    const src = fs.readFileSync(path.join(import.meta.dirname, f), "utf8");
+    assert.ok(!/process\.env\.SystemRoot/.test(src), `${f} must use the doctor.ts helpers`);
+  }
+  assert.ok(!/"System32"/.test(fs.readFileSync(path.join(import.meta.dirname, "claude-trust.ts"), "utf8")));
+  assert.ok(/system32\("reg\.exe"\)/.test(fs.readFileSync(path.join(import.meta.dirname, "claude-trust.ts"), "utf8")));
+  assert.ok(/system32From\(envGet\(ctx, "SystemRoot"\)/.test(fs.readFileSync(path.join(import.meta.dirname, "doctor.ts"), "utf8")));
+});
+
+test("pwsh resolved from a root-relative PATH entry is refused (shell_not_found)", { skip: !win && NOT_WIN }, (t) => {
+  const key = Object.keys(process.env).find((k) => k.toLowerCase() === "path") ?? "PATH";
+  const saved = process.env[key];
+  const dir = fixtureDir(t).dir;
+  const noDrive = dir.slice(2); // \Users\...\arrc conf ü✓ : root-relative
+  fs.writeFileSync(path.join(dir, "pwsh.exe"), "");
+  try {
+    process.env[key] = noDrive;
+    assert.deepEqual(planLaunch({ file: "C:\\x\\a.ps1", shell: "pwsh" }), { ok: false, reason: "shell_not_found" });
+  } finally {
+    if (saved === undefined) delete process.env[key];
+    else process.env[key] = saved;
+  }
+});
+
+test("launch.ts never uses shell: true", () => {
+  const src = fs.readFileSync(path.join(import.meta.dirname, "launch.ts"), "utf8");
+  assert.ok(!/shell:\s*true/.test(src), "launch.ts must not use shell: true");
 });
 
 test("runLaunch caps output at 1 MiB and flags truncation only when bytes were dropped", { skip: !win && NATIVE_WIN_ONLY }, async (t) => {
@@ -113,6 +170,14 @@ test("runLaunch caps output at 1 MiB and flags truncation only when bytes were d
   assert.equal(over.truncated, true);
   const small = await run(10);
   assert.equal(small.truncated, undefined);
+});
+
+test("runLaunch: after a surrogate pair is cut at the cap, later chunks are ignored (true prefix)", { skip: !win && NATIVE_WIN_ONLY }, async (t) => {
+  const { exe } = fixtureDir(t);
+  const r = await runLaunch({ file: exe, args: [echoScript] }, { timeoutMs: 20_000, env: { ARRC_SURR: "1" } });
+  assert.equal(r.stdout.length, 2 ** 20 - 1);
+  assert.equal(r.truncated, true);
+  assert.equal(r.stdout.at(-1), "x");
 });
 
 test("runLaunch: abort cancels a hanging run and resolves, never rejects", { skip: !win && NATIVE_WIN_ONLY }, async (t) => {
